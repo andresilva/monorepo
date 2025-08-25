@@ -1194,6 +1194,146 @@ impl<V: Variant> Seedable<V> for Nullification<V> {
     }
 }
 
+/// Nullifications represents an aggregated proof of multiple consecutive nullified views.
+/// It contains a single BLS signature that can verify a contiguous range `[start..=end]`
+/// of nullifications.
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub struct Nullifications<V: Variant> {
+    /// The first view in the nullified range.
+    pub start: View,
+    /// The last view in the nullified range (inclusive).
+    pub end: View,
+    /// The aggregated signature covering all nullifications and seeds in the range.
+    pub signature: V::Signature,
+}
+
+impl<V: Variant> Nullifications<V> {
+    /// Creates a new aggregated nullifications proof with the given range and aggregated
+    /// signature.
+    pub fn new(start: View, end: View, signature: V::Signature) -> Self {
+        Nullifications {
+            start,
+            end,
+            signature,
+        }
+    }
+
+    /// Creates a [Nullifications] from a slice of individual [Nullification] instances.
+    ///
+    /// This function aggregates multiple consecutive nullifications into a single
+    /// compressed representation. The input is expected to be:
+    /// - Non-empty
+    /// - Sorted by view in ascending order
+    /// - Consecutive (no gaps between views)
+    ///
+    /// Returns an error if any of these conditions are not met.
+    pub fn from_nullifications(nullifications: &[Nullification<V>]) -> Result<Self, Error> {
+        if nullifications.is_empty() {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::Nullifications",
+                "nullifications slice cannot be empty",
+            ));
+        }
+
+        // Check for consecutive views and collect signatures
+        let mut signatures = Vec::with_capacity(nullifications.len() * 2);
+
+        let start = nullifications
+            .first()
+            .expect("nullifications has been verified to be non-empty")
+            .view;
+
+        let end = nullifications
+            .last()
+            .expect("nullifications has been verified to be non-empty")
+            .view;
+
+        for (i, nullification) in nullifications.iter().enumerate() {
+            // Check that views are consecutive
+            if nullification.view != start + i as u64 {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Nullifications",
+                    "nullifications must be consecutive",
+                ));
+            }
+
+            // Collect both view and seed signatures for aggregation
+            signatures.push(nullification.view_signature);
+            signatures.push(nullification.seed_signature);
+        }
+
+        // Aggregate all signatures into one
+        let signature = aggregate_signatures::<V, _>(&signatures);
+
+        Ok(Nullifications {
+            start,
+            end,
+            signature,
+        })
+    }
+
+    /// Verifies the aggregated signature for this range of nullifications.
+    ///
+    /// This function verifies that the signature is valid for all nullification
+    /// and seed messages in the range [start..=end].
+    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
+        if self.start > self.end {
+            return false;
+        }
+
+        // Build the list of messages to verify.
+        // Each view has two messages: one for nullification, one for seed.
+        let nullify_namespace = nullify_namespace(namespace);
+        let seed_namespace = seed_namespace(namespace);
+        let view_messages: Vec<_> = (self.start..=self.end).map(view_message).collect();
+        let mut messages = Vec::with_capacity((self.end - self.start + 1) as usize * 2);
+
+        for view_msg in &view_messages {
+            messages.push((Some(nullify_namespace.as_ref()), view_msg.as_ref()));
+            messages.push((Some(seed_namespace.as_ref()), view_msg.as_ref()));
+        }
+
+        aggregate_verify_multiple_messages::<V, _>(identity, &messages, &self.signature, 1).is_ok()
+    }
+}
+
+impl<V: Variant> Write for Nullifications<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        UInt(self.start).write(writer);
+        UInt(self.end).write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Nullifications<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let start = UInt::read(reader)?.into();
+        let end = UInt::read(reader)?.into();
+
+        if start > end {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::Nullifications",
+                "start must be <= end",
+            ));
+        }
+
+        let signature = V::Signature::read(reader)?;
+        Ok(Nullifications {
+            start,
+            end,
+            signature,
+        })
+    }
+}
+
+impl<V: Variant> EncodeSize for Nullifications<V> {
+    fn encode_size(&self) -> usize {
+        UInt(self.start).encode_size() + UInt(self.end).encode_size() + self.signature.encode_size()
+    }
+}
+
 /// Finalize represents a validator's vote to finalize a proposal.
 /// This happens after a proposal has been notarized, confirming it as the canonical block for this view.
 /// It contains a partial signature on the proposal.
