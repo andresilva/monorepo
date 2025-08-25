@@ -2502,6 +2502,33 @@ mod tests {
         (*identity, polynomial, shares)
     }
 
+    // Helper function to generate a vector of [Nullification] for a range of views
+    fn generate_nullifications(
+        shares: &[Share],
+        threshold: u32,
+        start: View,
+        end: View,
+    ) -> Vec<Nullification<MinSig>> {
+        (start..=end)
+            .map(|view| {
+                let nullifies: Vec<_> = shares
+                    .iter()
+                    .take(threshold as usize)
+                    .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, view))
+                    .collect();
+
+                let view_partials = nullifies.iter().map(|n| &n.view_signature);
+                let view_signature =
+                    threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
+                let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
+                let seed_signature =
+                    threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
+
+                Nullification::new(view, view_signature, seed_signature)
+            })
+            .collect()
+    }
+
     #[test]
     fn test_proposal_encode_decode() {
         let proposal = Proposal::new(10, 5, sample_digest(1));
@@ -3833,5 +3860,128 @@ mod tests {
             false,
         );
         assert!(!verifier.ready_finalizes());
+    }
+
+    #[test]
+    fn test_nullifications_encode_decode() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 215);
+
+        // Create individual nullifications for views 10-12
+        let nullifications = generate_nullifications(&shares, threshold, 10, 12);
+
+        // Create compressed nullifications
+        let compressed = Nullifications::from_nullifications(&nullifications).unwrap();
+
+        // Test encoding and decoding
+        let encoded = compressed.encode();
+        let decoded = Nullifications::<MinSig>::decode(encoded).unwrap();
+
+        assert_eq!(compressed.start, decoded.start);
+        assert_eq!(compressed.end, decoded.end);
+        assert_eq!(compressed.signature, decoded.signature);
+    }
+
+    #[test]
+    fn test_nullifications_from_nullifications() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 216);
+
+        // Create individual nullifications for views 20-23
+        let nullifications = generate_nullifications(&shares, threshold, 20, 23);
+
+        // Test successful aggregation
+        let compressed = Nullifications::from_nullifications(&nullifications).unwrap();
+        assert_eq!(compressed.start, 20);
+        assert_eq!(compressed.end, 23);
+
+        // Test empty slice fails
+        let empty: Vec<Nullification<MinSig>> = vec![];
+        assert!(Nullifications::from_nullifications(&empty).is_err());
+
+        // Test unsorted views fails
+        let mut unsorted = nullifications.clone();
+        unsorted.swap(1, 2);
+        assert!(Nullifications::from_nullifications(&unsorted).is_err());
+
+        // Test missing views fails
+        let mut missing = nullifications.clone();
+        missing.remove(2);
+        assert!(Nullifications::from_nullifications(&missing).is_err());
+    }
+
+    #[test]
+    fn test_nullifications_verify() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 217);
+
+        // Create individual nullifications for views 30-32
+        let nullifications = generate_nullifications(&shares, threshold, 30, 32);
+
+        // Create compressed nullifications
+        let compressed = Nullifications::from_nullifications(&nullifications).unwrap();
+
+        // Test verification with correct identity
+        assert!(compressed.verify(NAMESPACE, &identity));
+
+        // Test verification with wrong identity
+        let (wrong_identity, _, _) = generate_test_data(n_validators, threshold, 0);
+        assert!(!compressed.verify(NAMESPACE, &wrong_identity));
+
+        // Test verification with wrong namespace
+        assert!(!compressed.verify(b"wrong", &identity));
+
+        // Test invalid bounds (start > end)
+        let invalid = Nullifications::<MinSig>::new(32, 30, compressed.signature);
+        assert!(!invalid.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_nullifications_single_view() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 218);
+
+        // Create a single nullification for view 100
+        let nullifications = generate_nullifications(&shares, threshold, 100, 100);
+        assert_eq!(nullifications.len(), 1);
+
+        // Create compressed nullifications for a single view
+        let compressed = Nullifications::from_nullifications(&nullifications).unwrap();
+        assert_eq!(compressed.start, 100);
+        assert_eq!(compressed.end, 100);
+
+        // Verify it works correctly
+        assert!(compressed.verify(NAMESPACE, &identity));
+
+        // Test encoding/decoding
+        let encoded = compressed.encode();
+        let decoded = Nullifications::<MinSig>::decode(encoded).unwrap();
+        assert_eq!(decoded.start, 100);
+        assert_eq!(decoded.end, 100);
+        assert_eq!(decoded.signature, compressed.signature);
+
+        // Verify decoded version also works
+        assert!(decoded.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_nullifications_read_invalid_bounds() {
+        use bytes::BytesMut;
+
+        // Create a buffer with invalid bounds (start > end)
+        let mut buf = BytesMut::new();
+        UInt(10u64).write(&mut buf);
+        UInt(5u64).write(&mut buf);
+
+        // Add a dummy signature bytes (will fail before checking it)
+        buf.extend_from_slice(&[0u8; 96]);
+
+        // Should fail due to invalid bounds
+        let result = Nullifications::<MinSig>::read(&mut buf.freeze());
+        assert!(result.is_err());
     }
 }
