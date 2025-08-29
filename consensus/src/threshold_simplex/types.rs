@@ -1299,6 +1299,41 @@ impl<V: Variant> Nullifications<V> {
         Ok(())
     }
 
+    /// Merges two consecutive [Nullifications] ranges into a single one.
+    ///
+    /// The ranges must be consecutive (no gap between them) but can be provided
+    /// in either order. For example, merging [1-5] with [6-10] or [6-10] with [1-5]
+    /// will both produce [1-10].
+    ///
+    /// Returns an error if the ranges are not consecutive (have a gap or overlap).
+    pub fn merge(&self, other: &Nullifications<V>) -> Result<Nullifications<V>, Error> {
+        // Forward merge
+        if self.end + 1 == other.start {
+            let signature = aggregate_signatures::<V, _>(&[self.signature, other.signature]);
+            return Ok(Nullifications {
+                start: self.start,
+                end: other.end,
+                signature,
+            });
+        }
+
+        // Reverse merge
+        if other.end + 1 == self.start {
+            let signature = aggregate_signatures::<V, _>(&[other.signature, self.signature]);
+            return Ok(Nullifications {
+                start: other.start,
+                end: self.end,
+                signature,
+            });
+        }
+
+        // Ranges are not consecutive
+        Err(Error::Invalid(
+            "consensus::threshold_simplex::Nullifications",
+            "ranges must be consecutive with no gap or overlap",
+        ))
+    }
+
     /// Verifies the aggregated signature for this range of nullifications.
     ///
     /// This function verifies that the signature is valid for all nullification
@@ -4105,6 +4140,183 @@ mod tests {
         assert_eq!(compressed.end, direct.end);
 
         // Both should verify correctly
+        assert!(direct.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_nullifications_merge() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 222);
+
+        // Create two consecutive ranges
+        let first_nullifications = generate_nullifications(&shares, threshold, 70, 74);
+        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+
+        let second_nullifications = generate_nullifications(&shares, threshold, 75, 79);
+        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+
+        // Merge them
+        let merged = first.merge(&second).unwrap();
+
+        // Verify merged range
+        assert_eq!(merged.start, 70);
+        assert_eq!(merged.end, 79);
+        assert!(merged.verify(NAMESPACE, &identity));
+
+        // Compare with creating directly from all nullifications
+        let all_nullifications = generate_nullifications(&shares, threshold, 70, 79);
+        let direct = Nullifications::from_nullifications(&all_nullifications).unwrap();
+
+        // Both should have the same range
+        assert_eq!(merged.start, direct.start);
+        assert_eq!(merged.end, direct.end);
+
+        // Both should verify correctly
+        assert!(direct.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_nullifications_merge_reverse() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 223);
+
+        // Create two consecutive ranges
+        let first_nullifications = generate_nullifications(&shares, threshold, 80, 84);
+        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+
+        let second_nullifications = generate_nullifications(&shares, threshold, 85, 89);
+        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+
+        // Merge in reverse order (second.merge(&first))
+        let merged = second.merge(&first).unwrap();
+
+        // Verify merged range
+        assert_eq!(merged.start, 80);
+        assert_eq!(merged.end, 89);
+        assert!(merged.verify(NAMESPACE, &identity));
+
+        // Should produce same result as forward merge
+        let forward_merged = first.merge(&second).unwrap();
+        assert_eq!(merged.start, forward_merged.start);
+        assert_eq!(merged.end, forward_merged.end);
+    }
+
+    #[test]
+    fn test_nullifications_merge_with_gap() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 224);
+
+        // Create two ranges with a gap (90-94 and 96-100, missing 95)
+        let first_nullifications = generate_nullifications(&shares, threshold, 90, 94);
+        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+
+        let second_nullifications = generate_nullifications(&shares, threshold, 96, 100);
+        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+
+        // Merge should fail due to gap
+        let result = first.merge(&second);
+        assert!(result.is_err());
+
+        // Also test reverse merge
+        let result = second.merge(&first);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nullifications_merge_overlapping() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 225);
+
+        // Create two overlapping ranges (100-105 and 103-108)
+        let first_nullifications = generate_nullifications(&shares, threshold, 100, 105);
+        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+
+        let second_nullifications = generate_nullifications(&shares, threshold, 103, 108);
+        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+
+        // Merge should fail due to overlap
+        let result = first.merge(&second);
+        assert!(result.is_err());
+
+        // Also test reverse merge
+        let result = second.merge(&first);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nullifications_merge_same_range() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 226);
+
+        // Create two identical ranges
+        let nullifications = generate_nullifications(&shares, threshold, 110, 115);
+        let first = Nullifications::from_nullifications(&nullifications).unwrap();
+        let second = Nullifications::from_nullifications(&nullifications).unwrap();
+
+        // Merge should fail because they're the same range
+        let result = first.merge(&second);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nullifications_merge_single_views() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 227);
+
+        // Create two single-view nullifications that are consecutive
+        let first_nullifications = generate_nullifications(&shares, threshold, 120, 120);
+        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+
+        let second_nullifications = generate_nullifications(&shares, threshold, 121, 121);
+        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+
+        // Merge them
+        let merged = first.merge(&second).unwrap();
+
+        // Verify merged range
+        assert_eq!(merged.start, 120);
+        assert_eq!(merged.end, 121);
+        assert!(merged.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_nullifications_merge_multiple() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 228);
+
+        // Create multiple consecutive ranges and merge them sequentially
+        let range1_nulls = generate_nullifications(&shares, threshold, 130, 134);
+        let range1 = Nullifications::from_nullifications(&range1_nulls).unwrap();
+
+        let range2_nulls = generate_nullifications(&shares, threshold, 135, 139);
+        let range2 = Nullifications::from_nullifications(&range2_nulls).unwrap();
+
+        let range3_nulls = generate_nullifications(&shares, threshold, 140, 144);
+        let range3 = Nullifications::from_nullifications(&range3_nulls).unwrap();
+
+        // Merge range1 and range2
+        let merged_1_2 = range1.merge(&range2).unwrap();
+        assert_eq!(merged_1_2.start, 130);
+        assert_eq!(merged_1_2.end, 139);
+
+        // Merge the result with range3
+        let merged_all = merged_1_2.merge(&range3).unwrap();
+        assert_eq!(merged_all.start, 130);
+        assert_eq!(merged_all.end, 144);
+        assert!(merged_all.verify(NAMESPACE, &identity));
+
+        // Compare with creating directly
+        let all_nullifications = generate_nullifications(&shares, threshold, 130, 144);
+        let direct = Nullifications::from_nullifications(&all_nullifications).unwrap();
+        assert_eq!(merged_all.start, direct.start);
+        assert_eq!(merged_all.end, direct.end);
         assert!(direct.verify(NAMESPACE, &identity));
     }
 }
