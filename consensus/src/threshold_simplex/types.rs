@@ -4828,4 +4828,964 @@ mod tests {
         assert_eq!(merged_all.end, direct.end);
         assert!(direct.verify(NAMESPACE, &identity));
     }
+
+    #[test]
+    fn test_nullifications_basic() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Test is_nullified on empty store
+        assert!(!store.is_nullified(0));
+        assert!(!store.is_nullified(10));
+
+        // Add a single nullification
+        let nulls = generate_nullifications(&shares, t, 5, 5);
+        assert!(store.add_single(nulls[0].clone()));
+        assert!(store.is_nullified(5));
+        assert!(!store.is_nullified(4));
+        assert!(!store.is_nullified(6));
+
+        // Try to add the same nullification again (should be rejected)
+        assert!(!store.add_single(nulls[0].clone()));
+    }
+
+    #[test]
+    fn test_nullifications_single_compaction() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add three singles - when 11 is added, it will compact with 10 and 12 into a range
+        let nulls = generate_nullifications(&shares, t, 10, 12);
+        assert!(store.add_single(nulls[0].clone())); // 10
+        assert!(store.add_single(nulls[2].clone())); // 12
+        assert!(store.add_single(nulls[1].clone())); // 11 - connects 10 and 12, triggers compaction
+
+        // Check all three are nullified
+        assert!(store.is_nullified(10));
+        assert!(store.is_nullified(11));
+        assert!(store.is_nullified(12));
+
+        // Verify it's stored as a range, not singles
+        assert_eq!(store.single.len(), 0);
+        assert_eq!(store.range.len(), 1);
+        assert!(store.range.contains_key(&10));
+
+        let range = store.range.get(&10).unwrap();
+        assert_eq!(range.start, 10);
+        assert_eq!(range.end, 12);
+    }
+
+    #[test]
+    fn test_nullifications_single_append_to_range() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create a range [10-12]
+        let nulls = generate_nullifications(&shares, t, 10, 13);
+        let range = NullificationRange::from_nullifications(&nulls[0..3]).unwrap();
+        assert!(store.add_range(range));
+
+        // Add single at 13 (should append to range)
+        assert!(store.add_single(nulls[3].clone()));
+
+        // Should have one range [10-13]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let range = store.range.get(&10).unwrap();
+        assert_eq!(range.start, 10);
+        assert_eq!(range.end, 13);
+    }
+
+    #[test]
+    fn test_nullifications_single_prepend_to_range() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create a range [10-12]
+        let nulls = generate_nullifications(&shares, t, 9, 12);
+        let range = NullificationRange::from_nullifications(&nulls[1..4]).unwrap();
+        assert!(store.add_range(range));
+
+        // Add single at 9 (should prepend to range)
+        assert!(store.add_single(nulls[0].clone()));
+
+        // Should have one range [9-12]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let range = store.range.get(&9).unwrap();
+        assert_eq!(range.start, 9);
+        assert_eq!(range.end, 12);
+    }
+
+    #[test]
+    fn test_nullifications_range_merge_adjacent() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add range [10-12]
+        let nulls1 = generate_nullifications(&shares, t, 10, 12);
+        let range1 = NullificationRange::from_nullifications(&nulls1).unwrap();
+        assert!(store.add_range(range1));
+
+        // Add range [13-15] (should merge with [10-12])
+        let nulls2 = generate_nullifications(&shares, t, 13, 15);
+        let range2 = NullificationRange::from_nullifications(&nulls2).unwrap();
+        assert!(store.add_range(range2));
+
+        // Should have one merged range [10-15]
+        assert_eq!(store.range.len(), 1);
+        let range = store.range.get(&10).unwrap();
+        assert_eq!(range.start, 10);
+        assert_eq!(range.end, 15);
+    }
+
+    #[test]
+    fn test_nullifications_range_merge_multiple() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add three separate ranges
+        let nulls1 = generate_nullifications(&shares, t, 10, 12);
+        let range1 = NullificationRange::from_nullifications(&nulls1).unwrap();
+        assert!(store.add_range(range1));
+
+        let nulls3 = generate_nullifications(&shares, t, 16, 18);
+        let range3 = NullificationRange::from_nullifications(&nulls3).unwrap();
+        assert!(store.add_range(range3));
+
+        // Add middle range that connects them [13-15]
+        let nulls2 = generate_nullifications(&shares, t, 13, 15);
+        let range2 = NullificationRange::from_nullifications(&nulls2).unwrap();
+        assert!(store.add_range(range2));
+
+        // Should merge all three into [10-18]
+        assert_eq!(store.range.len(), 1);
+        let range = store.range.get(&10).unwrap();
+        assert_eq!(range.start, 10);
+        assert_eq!(range.end, 18);
+    }
+
+    #[test]
+    fn test_nullifications_range_overlapping() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add range [10-15]
+        let nulls1 = generate_nullifications(&shares, t, 10, 15);
+        let range1 = NullificationRange::from_nullifications(&nulls1).unwrap();
+        assert!(store.add_range(range1));
+
+        // Try to add fully covered range [11-14] (should be rejected)
+        let nulls2 = generate_nullifications(&shares, t, 11, 14);
+        let range2 = NullificationRange::from_nullifications(&nulls2).unwrap();
+        assert!(!store.add_range(range2));
+
+        // Add wider range [10-20] (should replace the narrower one)
+        let nulls3 = generate_nullifications(&shares, t, 10, 20);
+        let range3 = NullificationRange::from_nullifications(&nulls3).unwrap();
+        assert!(store.add_range(range3));
+
+        assert_eq!(store.range.len(), 1);
+        let range = store.range.get(&10).unwrap();
+        assert_eq!(range.start, 10);
+        assert_eq!(range.end, 20);
+    }
+
+    #[test]
+    fn test_nullifications_pruning() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add singles at 5, 10, 15
+        let null5 = generate_nullifications(&shares, t, 5, 5);
+        let null10 = generate_nullifications(&shares, t, 10, 10);
+        let null15 = generate_nullifications(&shares, t, 15, 15);
+
+        assert!(store.add_single(null5[0].clone()));
+        assert!(store.add_single(null10[0].clone()));
+        assert!(store.add_single(null15[0].clone()));
+
+        // Add range [20-25]
+        let nulls_range = generate_nullifications(&shares, t, 20, 25);
+        let range = NullificationRange::from_nullifications(&nulls_range).unwrap();
+        assert!(store.add_range(range));
+
+        // Prune below 12
+        store.prune(12);
+
+        // Singles 5 and 10 should be removed
+        assert!(!store.single.contains_key(&5));
+        assert!(!store.single.contains_key(&10));
+        assert!(store.single.contains_key(&15));
+
+        // Range [20-25] should remain
+        assert_eq!(store.range.len(), 1);
+        assert!(store.range.contains_key(&20));
+
+        // Prune below 23 (partial range overlap)
+        store.prune(23);
+
+        // Range should still exist since part of it is >= 23
+        assert_eq!(store.range.len(), 1);
+        assert!(store.range.contains_key(&20));
+
+        // Prune below 26 (entire range below)
+        store.prune(26);
+
+        // Range should be removed
+        assert_eq!(store.range.len(), 0);
+    }
+
+    #[test]
+    fn test_nullifications_get() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add single at 10
+        let null10 = generate_nullifications(&shares, t, 10, 10);
+        assert!(store.add_single(null10[0].clone()));
+
+        // Add range [20-25]
+        let nulls_range = generate_nullifications(&shares, t, 20, 25);
+        let range = NullificationRange::from_nullifications(&nulls_range).unwrap();
+        assert!(store.add_range(range.clone()));
+
+        // Get single
+        match store.get(10) {
+            Some(NullificationProof::Single(n)) => assert_eq!(n.view, 10),
+            _ => panic!("Expected single at 10"),
+        }
+
+        // Get from range
+        match store.get(22) {
+            Some(NullificationProof::Range(r)) => {
+                assert_eq!(r.start, 20);
+                assert_eq!(r.end, 25);
+            }
+            _ => panic!("Expected range covering 22"),
+        }
+
+        // Get non-existent
+        assert!(store.get(15).is_none());
+    }
+
+    #[test]
+    fn test_nullifications_range_method() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add singles at 10, 12
+        let null10 = generate_nullifications(&shares, t, 10, 10);
+        let null12 = generate_nullifications(&shares, t, 12, 12);
+        assert!(store.add_single(null10[0].clone()));
+        assert!(store.add_single(null12[0].clone()));
+
+        // Add range [14-16]
+        let nulls_range = generate_nullifications(&shares, t, 14, 16);
+        let range = NullificationRange::from_nullifications(&nulls_range).unwrap();
+        assert!(store.add_range(range));
+
+        // Query complete range [10-16] (has gap at 11, 13)
+        assert!(store.range(10, 16).is_none());
+
+        // Query [10-12] with gap at 11
+        assert!(store.range(10, 12).is_none());
+
+        // Add missing singles
+        let null11 = generate_nullifications(&shares, t, 11, 11);
+        let null13 = generate_nullifications(&shares, t, 13, 13);
+        assert!(store.add_single(null11[0].clone()));
+        assert!(store.add_single(null13[0].clone()));
+
+        // Now [10-16] should return proofs
+        let proofs = store.range(10, 16).unwrap();
+        // Everything merged
+        assert_eq!(proofs.len(), 1);
+
+        // Query subset [14-15]
+        let proofs = store.range(14, 15).unwrap();
+        assert_eq!(proofs.len(), 1);
+    }
+
+    #[test]
+    fn test_nullifications_gaps() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add singles at 10, 12, 15
+        let null10 = generate_nullifications(&shares, t, 10, 10);
+        let null12 = generate_nullifications(&shares, t, 12, 12);
+        let null15 = generate_nullifications(&shares, t, 15, 15);
+        assert!(store.add_single(null10[0].clone()));
+        assert!(store.add_single(null12[0].clone()));
+        assert!(store.add_single(null15[0].clone()));
+
+        // Add range [20-25]
+        let nulls_range = generate_nullifications(&shares, t, 20, 25);
+        let range = NullificationRange::from_nullifications(&nulls_range).unwrap();
+        assert!(store.add_range(range));
+
+        // Find gaps in [10-25]
+        let gaps = store.gaps(10, 25);
+        assert_eq!(gaps.len(), 3);
+        assert_eq!(gaps[0], (11, 11));
+        assert_eq!(gaps[1], (13, 14));
+        assert_eq!(gaps[2], (16, 19));
+
+        // Find gaps in [8-30]
+        let gaps = store.gaps(8, 30);
+        assert_eq!(gaps.len(), 5);
+        assert_eq!(gaps[0], (8, 9));
+        assert_eq!(gaps[1], (11, 11));
+        assert_eq!(gaps[2], (13, 14));
+        assert_eq!(gaps[3], (16, 19));
+        assert_eq!(gaps[4], (26, 30));
+
+        // No gaps in covered range
+        let gaps = store.gaps(20, 25);
+        assert_eq!(gaps.len(), 0);
+    }
+
+    #[test]
+    fn test_nullifications_edge_cases() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(5);
+
+        // Adding below lowest_active_view
+        let null3 = generate_nullifications(&shares, t, 3, 3);
+        assert!(!store.add_single(null3[0].clone()));
+
+        // Adding at lowest_active_view
+        let null5 = generate_nullifications(&shares, t, 5, 5);
+        assert!(store.add_single(null5[0].clone()));
+
+        // View 0
+        let mut store0 = Nullifications::<MinSig>::new(0);
+        let null0 = generate_nullifications(&shares, t, 0, 0);
+        assert!(store0.add_single(null0[0].clone()));
+        assert!(store0.is_nullified(0));
+
+        // Prepending to range at view 1
+        let null1_3 = generate_nullifications(&shares, t, 1, 3);
+        let range1_3 = NullificationRange::from_nullifications(&null1_3).unwrap();
+        assert!(store0.add_range(range1_3));
+
+        // Range merges with adjacent single at view 0
+        assert_eq!(store0.range.len(), 1);
+        // Single was merged into range
+        assert_eq!(store0.single.len(), 0);
+        // Range now starts at 0
+        let range = store0.range.get(&0).unwrap();
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 3);
+    }
+
+    #[test]
+    fn test_nullifications_complex_merging() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create a complex pattern: ranges at [5-7], [11-13], [17-19]
+        // and singles at 9, 15
+        let range1 =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 5, 7))
+                .unwrap();
+        let range2 =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 11, 13))
+                .unwrap();
+        let range3 =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 17, 19))
+                .unwrap();
+
+        assert!(store.add_range(range1));
+        assert!(store.add_range(range2));
+        assert!(store.add_range(range3));
+
+        let null9 = generate_nullifications(&shares, t, 9, 9);
+        let null15 = generate_nullifications(&shares, t, 15, 15);
+        assert!(store.add_single(null9[0].clone()));
+        assert!(store.add_single(null15[0].clone()));
+
+        assert_eq!(store.range.len(), 3);
+        assert_eq!(store.single.len(), 2);
+
+        // Now add connecting pieces to trigger multiple merges
+        // Add 8 (connects to [5-7] and 9)
+        let null8 = generate_nullifications(&shares, t, 8, 8);
+        assert!(store.add_single(null8[0].clone()));
+
+        // 8 appends to [5-7] making [5-8], then merges with single 9 to make [5-9]
+        assert_eq!(store.range.len(), 3); // [5-9], [11-13], [17-19]
+        assert_eq!(store.single.len(), 1); // only 15 remains
+
+        // Add 10 (will prepend to [11-13] and merge everything from 5-13)
+        let null10 = generate_nullifications(&shares, t, 10, 10);
+        assert!(store.add_single(null10[0].clone()));
+
+        // 10 prepends to [11-13] making [10-13], then merges with [5-9] to make [5-13]
+        assert_eq!(store.range.len(), 2); // [5-13], [17-19]
+        assert_eq!(store.single.len(), 1); // only 15 remains
+
+        // Add range [14-16] which will connect multiple pieces
+        let range_14_16 =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 14, 16))
+                .unwrap();
+        assert!(store.add_range(range_14_16));
+
+        // [14-16] removes single 15 (which falls within it),
+        // then merges with [17-19] to form [14-19],
+        // then merges with [5-13] to form [5-19]
+        // Final state: [5-19]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+    }
+
+    #[test]
+    fn test_nullifications_single_already_covered() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add range [10-15]
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 10, 15))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        // Try to add singles within the range (should all be rejected)
+        let nulls = generate_nullifications(&shares, t, 11, 14);
+        for null in nulls {
+            assert!(!store.add_single(null));
+        }
+
+        // Range should remain unchanged
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+    }
+
+    #[test]
+    fn test_nullifications_multiple_range_coverage() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Test range fully covered by single existing range
+        // Add range [1-6]
+        let range_wide =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 1, 6))
+                .unwrap();
+        assert!(store.add_range(range_wide));
+
+        // Try to add [2-5] which is fully covered by [1-6]
+        let range_covered =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 2, 5))
+                .unwrap();
+
+        // This should be rejected as redundant
+        assert!(!store.add_range(range_covered));
+        assert_eq!(store.range.len(), 1);
+
+        // Test range that connects existing ranges
+        let mut store2 = Nullifications::<MinSig>::new(0);
+
+        // Add two ranges [10-12] and [15-17]
+        let range1 =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 10, 12))
+                .unwrap();
+        let range2 =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 15, 17))
+                .unwrap();
+        assert!(store2.add_range(range1));
+        assert!(store2.add_range(range2));
+        assert_eq!(store2.range.len(), 2);
+
+        // Add [13-14] which connects them
+        let range_bridge =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 13, 14))
+                .unwrap();
+        assert!(store2.add_range(range_bridge));
+
+        // Should result in one merged range [10-17]
+        assert_eq!(store2.range.len(), 1);
+        let merged = store2.range.values().next().unwrap();
+        assert_eq!(merged.start, 10);
+        assert_eq!(merged.end, 17);
+    }
+
+    #[test]
+    fn test_nullifications_prune_mid_range() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add range [10-20]
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 10, 20))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        // Add singles at 5 and 25
+        let null5 = generate_nullifications(&shares, t, 5, 5);
+        let null25 = generate_nullifications(&shares, t, 25, 25);
+        assert!(store.add_single(null5[0].clone()));
+        assert!(store.add_single(null25[0].clone()));
+
+        // Prune at view 15 (middle of the range)
+        store.prune(15);
+
+        // Range [10-20] should still exist because part of it (15-20) is >= 15
+        assert_eq!(store.range.len(), 1);
+        assert!(store.range.contains_key(&10));
+
+        // Single at 5 should be removed, single at 25 should remain
+        assert!(!store.single.contains_key(&5));
+        assert!(store.single.contains_key(&25));
+
+        // Verify the range is intact
+        let range = store.range.get(&10).unwrap();
+        assert_eq!(range.start, 10);
+        assert_eq!(range.end, 20);
+    }
+
+    #[test]
+    fn test_nullifications_range_removes_singles() {
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add singles at 10, 11, 12, 14, 16 (not consecutive at the end)
+        let nulls10_12 = generate_nullifications(&shares, t, 10, 12);
+        let null14 = generate_nullifications(&shares, t, 14, 14);
+        let null16 = generate_nullifications(&shares, t, 16, 16);
+        assert!(store.add_single(nulls10_12[0].clone())); // 10
+        assert!(store.add_single(nulls10_12[1].clone())); // 11
+        assert!(store.add_single(nulls10_12[2].clone())); // 12
+        assert!(store.add_single(null14[0].clone())); // 14
+        assert!(store.add_single(null16[0].clone())); // 16
+
+        // Should have one range [10-12] and singles at 14, 16
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 2);
+
+        // Add range [13-20] which overlaps with singles 14, 16
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 13, 20))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        // Should merge [10-12] with [13-20] and remove singles 14, 16
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.get(&10).unwrap();
+        assert_eq!(final_range.start, 10);
+        assert_eq!(final_range.end, 20);
+    }
+
+    #[test]
+    fn test_nullifications_iterative_merging() {
+        // Test that we achieve optimal compaction when there are multiple layers of adjacent singles
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create singles at 5, 6, 7, 11, 12, 13
+        let nulls = generate_nullifications(&shares, t, 5, 13);
+        assert!(store.add_single(nulls[0].clone())); // 5
+        assert!(store.add_single(nulls[1].clone())); // 6
+        assert!(store.add_single(nulls[2].clone())); // 7
+        assert!(store.add_single(nulls[6].clone())); // 11
+        assert!(store.add_single(nulls[7].clone())); // 12
+        assert!(store.add_single(nulls[8].clone())); // 13
+
+        // Should have two ranges [5-7] and [11-13] due to compaction
+        assert_eq!(store.range.len(), 2);
+        assert_eq!(store.single.len(), 0);
+
+        // Now add range [8-10] which should connect everything
+        let range_8_10 =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 8, 10))
+                .unwrap();
+        assert!(store.add_range(range_8_10));
+
+        // Everything should merge into a single range [5-13]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 5);
+        assert_eq!(final_range.end, 13);
+    }
+
+    #[test]
+    fn test_nullifications_chain_reaction() {
+        // Test chain reaction of merges when adding a single
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create pattern: single 5, single 6, range [8-10], single 11, single 12
+        let nulls = generate_nullifications(&shares, t, 5, 12);
+        assert!(store.add_single(nulls[0].clone())); // 5
+        assert!(store.add_single(nulls[1].clone())); // 6
+
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 8, 10))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        assert!(store.add_single(nulls[6].clone())); // 11 - merges with [8-10] to make [8-11]
+        assert!(store.add_single(nulls[7].clone())); // 12 - merges with [8-11] to make [8-12]
+
+        // Now we have: [5-6], [8-12]
+        assert_eq!(store.range.len(), 2);
+        assert_eq!(store.single.len(), 0);
+
+        // Add single 7 - should trigger chain reaction merging everything
+        assert!(store.add_single(nulls[2].clone())); // 7
+
+        // Should merge into single range [5-12]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 5);
+        assert_eq!(final_range.end, 12);
+    }
+
+    #[test]
+    fn test_nullifications_multiple_adjacent_singles() {
+        // Test that when merging singles into a range, we keep checking for more adjacent singles
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create singles at 3, 4, 5, 6 and range [8-10]
+        let nulls = generate_nullifications(&shares, t, 3, 10);
+        assert!(store.add_single(nulls[0].clone())); // 3
+        assert!(store.add_single(nulls[1].clone())); // 4
+        assert!(store.add_single(nulls[2].clone())); // 5
+        assert!(store.add_single(nulls[3].clone())); // 6
+
+        // After compaction: [3-6]
+        assert_eq!(store.range.len(), 1);
+
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 8, 10))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        // Now have [3-6] and [8-10]
+        assert_eq!(store.range.len(), 2);
+
+        // Add single 7 - should connect everything into [3-10]
+        assert!(store.add_single(nulls[4].clone())); // 7
+
+        // Should have merged everything
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 3);
+        assert_eq!(final_range.end, 10);
+    }
+
+    #[test]
+    fn test_nullifications_scattered_singles_optimal_merge() {
+        // Test an extreme case with many scattered singles
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create a complex pattern:
+        // Singles: 1, 2, 3, 5, 7, 9, 11, 13, 14, 15
+        let nulls = generate_nullifications(&shares, t, 1, 15);
+        assert!(store.add_single(nulls[0].clone())); // 1
+        assert!(store.add_single(nulls[1].clone())); // 2
+        assert!(store.add_single(nulls[2].clone())); // 3
+        assert!(store.add_single(nulls[4].clone())); // 5
+        assert!(store.add_single(nulls[6].clone())); // 7
+        assert!(store.add_single(nulls[8].clone())); // 9
+        assert!(store.add_single(nulls[10].clone())); // 11
+        assert!(store.add_single(nulls[12].clone())); // 13
+        assert!(store.add_single(nulls[13].clone())); // 14
+        assert!(store.add_single(nulls[14].clone())); // 15
+
+        // After compaction: [1-3], singles at 5, 7, 9, 11, [13-15]
+        assert_eq!(store.range.len(), 2); // [1-3] and [13-15]
+        assert_eq!(store.single.len(), 4); // 5, 7, 9, 11
+
+        // Now add range [4-12] which should connect everything
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 4, 12))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        // Everything should merge into [1-15]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 1);
+        assert_eq!(final_range.end, 15);
+    }
+
+    #[test]
+    fn test_nullifications_deep_single_layers() {
+        // Test that we iteratively merge all adjacent singles when extending a range
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create singles at 1, 2, 3 and range [5-7]
+        let nulls = generate_nullifications(&shares, t, 1, 7);
+        assert!(store.add_single(nulls[0].clone())); // 1
+        assert!(store.add_single(nulls[1].clone())); // 2
+        assert!(store.add_single(nulls[2].clone())); // 3
+
+        // Singles compact to [1-3]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let range_5_7 =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 5, 7))
+                .unwrap();
+        assert!(store.add_range(range_5_7));
+
+        // Now have [1-3] and [5-7]
+        assert_eq!(store.range.len(), 2);
+
+        // Add single 4 - should connect everything
+        assert!(store.add_single(nulls[3].clone())); // 4
+
+        // Everything should merge into [1-7]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 1);
+        assert_eq!(final_range.end, 7);
+    }
+
+    #[test]
+    fn test_nullifications_prepend_then_append_single() {
+        // Test the specific case where prepending a single to a range should also check for appending
+        // Scenario: Range [11-12], single at 9, single at 13, add single at 10
+        // Expected: Single 10 prepends to [11-12] making [10-12],
+        // then checks for single at 9 (prepend), making [9-12],
+        // then checks for single at 13 (append), making [9-13]
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // First add single at 9
+        let nulls = generate_nullifications(&shares, t, 9, 13);
+        assert!(store.add_single(nulls[0].clone())); // 9
+
+        // Create range [11-12] (won't merge with 9 since not adjacent)
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 11, 12))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        // Add single at 13 (won't merge with [11-12] since add_range already happened)
+        assert!(store.add_single(nulls[4].clone())); // 13
+
+        // Now have single 9, range [11-13], and no more singles
+        // Wait, 13 will merge with [11-12] when we add it...
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 1); // Only single 9
+
+        // Add single at 10 - should prepend to [11-13] making [10-13],
+        // then check for single at 9 (prepend), making [9-13]
+        assert!(store.add_single(nulls[1].clone())); // 10
+
+        // Should have merged everything into [9-13]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 9);
+        assert_eq!(final_range.end, 13);
+    }
+
+    #[test]
+    fn test_nullifications_prepend_check_new_end() {
+        // Test that after prepending to a range, we check for singles at the NEW end
+        // Scenario: Range [12-13], single at 10, single at 14, add single at 11
+        // Expected: Single 11 prepends to [12-13] making [11-13],
+        // then checks for single at 10 (11-1) prepending to make [10-13],
+        // then checks for single at 14 (13+1) appending to make [10-14]
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Add singles at 10 and 14
+        let nulls = generate_nullifications(&shares, t, 10, 14);
+        assert!(store.add_single(nulls[0].clone())); // 10
+        assert!(store.add_single(nulls[4].clone())); // 14
+
+        // Create range [12-13]
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 12, 13))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        // Should have merged 14 with [12-13] to make [12-14]
+        // And we have single 10
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 1);
+
+        // Add single at 11 - should prepend to [12-14] making [11-14],
+        // then check for single at 10 making [10-14]
+        assert!(store.add_single(nulls[1].clone())); // 11
+
+        // Should have merged everything into [10-14]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 10);
+        assert_eq!(final_range.end, 14);
+    }
+
+    #[test]
+    fn test_nullifications_prepend_branch_append_check() {
+        // When prepending to a range at view+1, after prepending we check for a single at range.end+1
+        // Setup: Range [5-6], single at 8, add single at 4
+        // Expected: 4 prepends to [5-6] making [4-6], then checks for single at 7 (6+1) - none exists,
+        // but checks for single at 8 (which is at position 6+2, not 6+1) - should NOT merge
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // Create range [5-6]
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 5, 6))
+                .unwrap();
+        assert!(store.add_range(range));
+
+        // Add single at 7 (this is the key - it's at end+1 of the original range)
+        let nulls = generate_nullifications(&shares, t, 4, 7);
+        assert!(store.add_single(nulls[3].clone())); // 7
+
+        // Now have range [5-7] (merged)
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+        let r = store.range.values().next().unwrap();
+        assert_eq!(r.start, 5);
+        assert_eq!(r.end, 7);
+
+        // Add single at 4 - should prepend to [5-7] making [4-7]
+        // but there's no single at 8, so no additional merge happens
+        assert!(store.add_single(nulls[0].clone())); // 4
+
+        // Should have [4-7]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 4);
+        assert_eq!(final_range.end, 7);
+    }
+
+    #[test]
+    fn test_nullifications_prepend_branch_append_check_with_merge() {
+        // We need a careful setup to ensure the single at end+1 exists when we prepend
+        let n = 5;
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
+
+        let mut store = Nullifications::<MinSig>::new(0);
+
+        // First, create the range [5-6] directly
+        let range =
+            NullificationRange::from_nullifications(&generate_nullifications(&shares, t, 5, 6))
+                .unwrap();
+        store.range.insert(5, range);
+
+        // Add single at 7 directly (bypassing add_single to avoid merging)
+        let nulls = generate_nullifications(&shares, t, 4, 7);
+        store.single.insert(7, nulls[3].clone());
+
+        // Now have range [5-6] and single at 7
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 1);
+
+        // Add single at 4 - should prepend to [5-6] making [4-6]
+        assert!(store.add_single(nulls[0].clone())); // 4
+
+        // Should have merged everything into [4-7]
+        assert_eq!(store.range.len(), 1);
+        assert_eq!(store.single.len(), 0);
+
+        let final_range = store.range.values().next().unwrap();
+        assert_eq!(final_range.start, 4);
+        assert_eq!(final_range.end, 7);
+    }
 }
