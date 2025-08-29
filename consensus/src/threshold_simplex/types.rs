@@ -1194,14 +1194,14 @@ impl<V: Variant> Seedable<V> for Nullification<V> {
     }
 }
 
-/// Nullifications represents an aggregated proof of multiple consecutive nullified views.
-/// It contains a single BLS signature that can verify a contiguous range `[start..=end]`
-/// of nullifications.
+/// Represents an aggregated proof of multiple consecutive nullified views. It contains a
+/// single BLS signature that can verify a contiguous range `[start..=end]` of
+/// nullifications.
 ///
 /// This always represents at least two views (i.e., `start < end`). A single nullified
 /// view should use [Nullification] instead.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Nullifications<V: Variant> {
+pub struct NullificationRange<V: Variant> {
     /// The first view in the nullified range.
     pub start: View,
     /// The last view in the nullified range (inclusive).
@@ -1210,7 +1210,7 @@ pub struct Nullifications<V: Variant> {
     pub signature: V::Signature,
 }
 
-impl<V: Variant> Nullifications<V> {
+impl<V: Variant> NullificationRange<V> {
     /// Creates a new aggregated nullifications proof with the given range and aggregated
     /// signature.
     ///
@@ -1218,18 +1218,18 @@ impl<V: Variant> Nullifications<V> {
     pub fn new(start: View, end: View, signature: V::Signature) -> Result<Self, Error> {
         if start >= end {
             return Err(Error::Invalid(
-                "consensus::threshold_simplex::Nullifications",
+                "consensus::threshold_simplex::NullificationRange",
                 "start must be < end (range must contain at least 2 views)",
             ));
         }
-        Ok(Nullifications {
+        Ok(NullificationRange {
             start,
             end,
             signature,
         })
     }
 
-    /// Creates a [Nullifications] from a slice of individual [Nullification] instances.
+    /// Creates a [NullificationRange] from a slice of individual [Nullification] instances.
     ///
     /// This function aggregates multiple consecutive nullifications into a single
     /// compressed representation. The input is expected to be:
@@ -1241,7 +1241,7 @@ impl<V: Variant> Nullifications<V> {
     pub fn from_nullifications(nullifications: &[Nullification<V>]) -> Result<Self, Error> {
         if nullifications.is_empty() {
             return Err(Error::Invalid(
-                "consensus::threshold_simplex::Nullifications",
+                "consensus::threshold_simplex::NullificationRange",
                 "nullifications slice cannot be empty",
             ));
         }
@@ -1249,8 +1249,8 @@ impl<V: Variant> Nullifications<V> {
         // Reject single nullification
         if nullifications.len() == 1 {
             return Err(Error::Invalid(
-                "consensus::threshold_simplex::Nullifications",
-                "cannot create Nullifications from single view",
+                "consensus::threshold_simplex::NullificationRange",
+                "cannot create NullificationRange from single view",
             ));
         }
 
@@ -1271,7 +1271,7 @@ impl<V: Variant> Nullifications<V> {
             // Check that views are consecutive
             if nullification.view != start + i as u64 {
                 return Err(Error::Invalid(
-                    "consensus::threshold_simplex::Nullifications",
+                    "consensus::threshold_simplex::NullificationRange",
                     "nullifications must be consecutive",
                 ));
             }
@@ -1284,7 +1284,7 @@ impl<V: Variant> Nullifications<V> {
         // Aggregate all signatures into one
         let signature = aggregate_signatures::<V, _>(&signatures);
 
-        Nullifications::new(start, end, signature)
+        NullificationRange::new(start, end, signature)
     }
 
     /// Appends a single [Nullification] to this aggregated proof.
@@ -1297,7 +1297,7 @@ impl<V: Variant> Nullifications<V> {
         // Check that the new nullification is consecutive
         if nullification.view != self.end + 1 {
             return Err(Error::Invalid(
-                "consensus::threshold_simplex::Nullifications",
+                "consensus::threshold_simplex::NullificationRange",
                 "nullification must be for the next consecutive view",
             ));
         }
@@ -1314,29 +1314,29 @@ impl<V: Variant> Nullifications<V> {
         Ok(())
     }
 
-    /// Merges two consecutive [Nullifications] ranges into a single one.
+    /// Merges two consecutive [NullificationRange] into a single one.
     ///
     /// The ranges must be consecutive (no gap between them) but can be provided
     /// in either order. For example, merging [1-5] with [6-10] or [6-10] with [1-5]
     /// will both produce [1-10].
     ///
     /// Returns an error if the ranges are not consecutive (have a gap or overlap).
-    pub fn merge(&self, other: &Nullifications<V>) -> Result<Nullifications<V>, Error> {
+    pub fn merge(&self, other: &NullificationRange<V>) -> Result<NullificationRange<V>, Error> {
         // Forward merge
         if self.end + 1 == other.start {
             let signature = aggregate_signatures::<V, _>(&[self.signature, other.signature]);
-            return Nullifications::new(self.start, other.end, signature);
+            return NullificationRange::new(self.start, other.end, signature);
         }
 
         // Reverse merge
         if other.end + 1 == self.start {
             let signature = aggregate_signatures::<V, _>(&[other.signature, self.signature]);
-            return Nullifications::new(other.start, self.end, signature);
+            return NullificationRange::new(other.start, self.end, signature);
         }
 
         // Ranges are not consecutive
         Err(Error::Invalid(
-            "consensus::threshold_simplex::Nullifications",
+            "consensus::threshold_simplex::NullificationRange",
             "ranges must be consecutive with no gap or overlap",
         ))
     }
@@ -1362,7 +1362,7 @@ impl<V: Variant> Nullifications<V> {
     }
 }
 
-impl<V: Variant> Write for Nullifications<V> {
+impl<V: Variant> Write for NullificationRange<V> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.start).write(writer);
         UInt(self.end).write(writer);
@@ -1370,7 +1370,7 @@ impl<V: Variant> Write for Nullifications<V> {
     }
 }
 
-impl<V: Variant> Read for Nullifications<V> {
+impl<V: Variant> Read for NullificationRange<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -1379,17 +1379,17 @@ impl<V: Variant> Read for Nullifications<V> {
 
         if start >= end {
             return Err(Error::Invalid(
-                "consensus::threshold_simplex::Nullifications",
+                "consensus::threshold_simplex::NullificationRange",
                 "start must be < end (range must contain at least 2 views)",
             ));
         }
 
         let signature = V::Signature::read(reader)?;
-        Nullifications::new(start, end, signature)
+        NullificationRange::new(start, end, signature)
     }
 }
 
-impl<V: Variant> EncodeSize for Nullifications<V> {
+impl<V: Variant> EncodeSize for NullificationRange<V> {
     fn encode_size(&self) -> usize {
         UInt(self.start).encode_size() + UInt(self.end).encode_size() + self.signature.encode_size()
     }
@@ -3924,7 +3924,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullifications_encode_decode() {
+    fn test_nullification_range_encode_decode() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, _, shares) = generate_test_data(n_validators, threshold, 215);
@@ -3932,20 +3932,20 @@ mod tests {
         // Create individual nullifications for views 10-12
         let nullifications = generate_nullifications(&shares, threshold, 10, 12);
 
-        // Create compressed nullifications
-        let compressed = Nullifications::from_nullifications(&nullifications).unwrap();
+        // Create range nullifications
+        let range = NullificationRange::from_nullifications(&nullifications).unwrap();
 
         // Test encoding and decoding
-        let encoded = compressed.encode();
-        let decoded = Nullifications::<MinSig>::decode(encoded).unwrap();
+        let encoded = range.encode();
+        let decoded = NullificationRange::<MinSig>::decode(encoded).unwrap();
 
-        assert_eq!(compressed.start, decoded.start);
-        assert_eq!(compressed.end, decoded.end);
-        assert_eq!(compressed.signature, decoded.signature);
+        assert_eq!(range.start, decoded.start);
+        assert_eq!(range.end, decoded.end);
+        assert_eq!(range.signature, decoded.signature);
     }
 
     #[test]
-    fn test_nullifications_from_nullifications() {
+    fn test_nullification_range_from_nullifications() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, _, shares) = generate_test_data(n_validators, threshold, 216);
@@ -3954,27 +3954,27 @@ mod tests {
         let nullifications = generate_nullifications(&shares, threshold, 20, 23);
 
         // Test successful aggregation
-        let compressed = Nullifications::from_nullifications(&nullifications).unwrap();
-        assert_eq!(compressed.start, 20);
-        assert_eq!(compressed.end, 23);
+        let range = NullificationRange::from_nullifications(&nullifications).unwrap();
+        assert_eq!(range.start, 20);
+        assert_eq!(range.end, 23);
 
         // Test empty slice fails
         let empty: Vec<Nullification<MinSig>> = vec![];
-        assert!(Nullifications::from_nullifications(&empty).is_err());
+        assert!(NullificationRange::from_nullifications(&empty).is_err());
 
         // Test unsorted views fails
         let mut unsorted = nullifications.clone();
         unsorted.swap(1, 2);
-        assert!(Nullifications::from_nullifications(&unsorted).is_err());
+        assert!(NullificationRange::from_nullifications(&unsorted).is_err());
 
         // Test missing views fails
         let mut missing = nullifications.clone();
         missing.remove(2);
-        assert!(Nullifications::from_nullifications(&missing).is_err());
+        assert!(NullificationRange::from_nullifications(&missing).is_err());
     }
 
     #[test]
-    fn test_nullifications_verify() {
+    fn test_nullification_range_verify() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 217);
@@ -3982,22 +3982,22 @@ mod tests {
         // Create individual nullifications for views 30-32
         let nullifications = generate_nullifications(&shares, threshold, 30, 32);
 
-        // Create compressed nullifications
-        let compressed = Nullifications::from_nullifications(&nullifications).unwrap();
+        // Create range nullifications
+        let range = NullificationRange::from_nullifications(&nullifications).unwrap();
 
         // Test verification with correct identity
-        assert!(compressed.verify(NAMESPACE, &identity));
+        assert!(range.verify(NAMESPACE, &identity));
 
         // Test verification with wrong identity
         let (wrong_identity, _, _) = generate_test_data(n_validators, threshold, 0);
-        assert!(!compressed.verify(NAMESPACE, &wrong_identity));
+        assert!(!range.verify(NAMESPACE, &wrong_identity));
 
         // Test verification with wrong namespace
-        assert!(!compressed.verify(b"wrong", &identity));
+        assert!(!range.verify(b"wrong", &identity));
     }
 
     #[test]
-    fn test_nullifications_enforce_range() {
+    fn test_nullification_range_enforce_range() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 218);
@@ -4005,21 +4005,21 @@ mod tests {
         // Test that single view is rejected
         let single_nullification = generate_nullifications(&shares, threshold, 100, 100);
         assert_eq!(single_nullification.len(), 1);
-        let result = Nullifications::from_nullifications(&single_nullification);
+        let result = NullificationRange::from_nullifications(&single_nullification);
         assert!(result.is_err());
 
         // Test that two views work
         let two_nullifications = generate_nullifications(&shares, threshold, 100, 101);
         assert_eq!(two_nullifications.len(), 2);
-        let result = Nullifications::from_nullifications(&two_nullifications);
+        let result = NullificationRange::from_nullifications(&two_nullifications);
         assert!(result.is_ok());
-        let compressed = result.unwrap();
-        assert_eq!(compressed.start, 100);
-        assert_eq!(compressed.end, 101);
+        let range = result.unwrap();
+        assert_eq!(range.start, 100);
+        assert_eq!(range.end, 101);
     }
 
     #[test]
-    fn test_nullifications_new_invalid_range() {
+    fn test_nullification_range_new_invalid_range() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 219);
@@ -4034,12 +4034,12 @@ mod tests {
         let signature = threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
 
         // This should return an error
-        let result = Nullifications::<MinSig>::new(100, 100, signature);
+        let result = NullificationRange::<MinSig>::new(100, 100, signature);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_nullifications_new_start_greater_than_end() {
+    fn test_nullification_range_new_start_greater_than_end() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 220);
@@ -4054,12 +4054,12 @@ mod tests {
         let signature = threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
 
         // This should return an error
-        let result = Nullifications::<MinSig>::new(100, 99, signature);
+        let result = NullificationRange::<MinSig>::new(100, 99, signature);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_nullifications_read_invalid_bounds() {
+    fn test_nullification_range_read_invalid_bounds() {
         use bytes::BytesMut;
 
         // Create a valid signature for testing
@@ -4079,7 +4079,7 @@ mod tests {
         UInt(10u64).write(&mut buf);
         UInt(5u64).write(&mut buf);
         signature.write(&mut buf);
-        let result = Nullifications::<MinSig>::read(&mut buf.freeze());
+        let result = NullificationRange::<MinSig>::read(&mut buf.freeze());
         assert!(result.is_err());
 
         // Test start == end (single view, should also fail)
@@ -4087,7 +4087,7 @@ mod tests {
         UInt(10u64).write(&mut buf);
         UInt(10u64).write(&mut buf);
         signature.write(&mut buf);
-        let result = Nullifications::<MinSig>::read(&mut buf.freeze());
+        let result = NullificationRange::<MinSig>::read(&mut buf.freeze());
         assert!(result.is_err());
 
         // Test valid range (start < end)
@@ -4095,7 +4095,7 @@ mod tests {
         UInt(10u64).write(&mut buf);
         UInt(15u64).write(&mut buf);
         signature.write(&mut buf);
-        let result = Nullifications::<MinSig>::read(&mut buf.freeze());
+        let result = NullificationRange::<MinSig>::read(&mut buf.freeze());
         assert!(result.is_ok());
         let nullifications = result.unwrap();
         assert_eq!(nullifications.start, 10);
@@ -4103,113 +4103,113 @@ mod tests {
     }
 
     #[test]
-    fn test_nullifications_append() {
+    fn test_nullification_range_append() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 219);
 
         // Create initial nullifications for views 40-42
         let initial_nullifications = generate_nullifications(&shares, threshold, 40, 42);
-        let mut compressed = Nullifications::from_nullifications(&initial_nullifications).unwrap();
+        let mut range = NullificationRange::from_nullifications(&initial_nullifications).unwrap();
 
         // Verify initial state
-        assert_eq!(compressed.start, 40);
-        assert_eq!(compressed.end, 42);
-        assert!(compressed.verify(NAMESPACE, &identity));
+        assert_eq!(range.start, 40);
+        assert_eq!(range.end, 42);
+        assert!(range.verify(NAMESPACE, &identity));
 
         // Create and append nullification for view 43
         let next_nullification = generate_nullifications(&shares, threshold, 43, 43);
-        compressed.append(&next_nullification[0]).unwrap();
+        range.append(&next_nullification[0]).unwrap();
 
         // Verify after append
-        assert_eq!(compressed.start, 40);
-        assert_eq!(compressed.end, 43);
-        assert!(compressed.verify(NAMESPACE, &identity));
+        assert_eq!(range.start, 40);
+        assert_eq!(range.end, 43);
+        assert!(range.verify(NAMESPACE, &identity));
 
         // Append view 44
         let next_nullification = generate_nullifications(&shares, threshold, 44, 44);
-        compressed.append(&next_nullification[0]).unwrap();
+        range.append(&next_nullification[0]).unwrap();
 
         // Verify after second append
-        assert_eq!(compressed.start, 40);
-        assert_eq!(compressed.end, 44);
-        assert!(compressed.verify(NAMESPACE, &identity));
+        assert_eq!(range.start, 40);
+        assert_eq!(range.end, 44);
+        assert!(range.verify(NAMESPACE, &identity));
     }
 
     #[test]
-    fn test_nullifications_append_non_consecutive() {
+    fn test_nullification_range_append_non_consecutive() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 220);
 
         // Create initial nullifications for views 50-52
         let initial_nullifications = generate_nullifications(&shares, threshold, 50, 52);
-        let mut compressed = Nullifications::from_nullifications(&initial_nullifications).unwrap();
+        let mut range = NullificationRange::from_nullifications(&initial_nullifications).unwrap();
 
         // Try to append non-consecutive view 54 (skipping 53)
         let non_consecutive = generate_nullifications(&shares, threshold, 54, 54);
-        let result = compressed.append(&non_consecutive[0]);
+        let result = range.append(&non_consecutive[0]);
 
         // Should fail due to non-consecutive view
         assert!(result.is_err());
-        assert_eq!(compressed.end, 52); // End should remain unchanged
+        assert_eq!(range.end, 52); // End should remain unchanged
 
         // Try to append a view that's before the current end
         let before_end = generate_nullifications(&shares, threshold, 51, 51);
-        let result = compressed.append(&before_end[0]);
+        let result = range.append(&before_end[0]);
         assert!(result.is_err());
 
         // Try to append the same view as current end
         let same_as_end = generate_nullifications(&shares, threshold, 52, 52);
-        let result = compressed.append(&same_as_end[0]);
+        let result = range.append(&same_as_end[0]);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_nullifications_append_multiple() {
+    fn test_nullification_range_append_multiple() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 221);
 
         // Start with two nullifications
         let initial = generate_nullifications(&shares, threshold, 60, 61);
-        let mut compressed = Nullifications::from_nullifications(&initial).unwrap();
+        let mut range = NullificationRange::from_nullifications(&initial).unwrap();
 
         // Append multiple nullifications sequentially
         for view in 62..=65 {
             let nullification = generate_nullifications(&shares, threshold, view, view);
-            compressed.append(&nullification[0]).unwrap();
+            range.append(&nullification[0]).unwrap();
         }
 
         // Verify final state
-        assert_eq!(compressed.start, 60);
-        assert_eq!(compressed.end, 65);
-        assert!(compressed.verify(NAMESPACE, &identity));
+        assert_eq!(range.start, 60);
+        assert_eq!(range.end, 65);
+        assert!(range.verify(NAMESPACE, &identity));
 
         // Compare with creating directly from all nullifications
         let all_nullifications = generate_nullifications(&shares, threshold, 60, 65);
-        let direct = Nullifications::from_nullifications(&all_nullifications).unwrap();
+        let direct = NullificationRange::from_nullifications(&all_nullifications).unwrap();
 
         // Both should have the same range
-        assert_eq!(compressed.start, direct.start);
-        assert_eq!(compressed.end, direct.end);
+        assert_eq!(range.start, direct.start);
+        assert_eq!(range.end, direct.end);
 
         // Both should verify correctly
         assert!(direct.verify(NAMESPACE, &identity));
     }
 
     #[test]
-    fn test_nullifications_merge() {
+    fn test_nullification_range_merge() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 222);
 
         // Create two consecutive ranges
         let first_nullifications = generate_nullifications(&shares, threshold, 70, 74);
-        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+        let first = NullificationRange::from_nullifications(&first_nullifications).unwrap();
 
         let second_nullifications = generate_nullifications(&shares, threshold, 75, 79);
-        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+        let second = NullificationRange::from_nullifications(&second_nullifications).unwrap();
 
         // Merge them
         let merged = first.merge(&second).unwrap();
@@ -4221,7 +4221,7 @@ mod tests {
 
         // Compare with creating directly from all nullifications
         let all_nullifications = generate_nullifications(&shares, threshold, 70, 79);
-        let direct = Nullifications::from_nullifications(&all_nullifications).unwrap();
+        let direct = NullificationRange::from_nullifications(&all_nullifications).unwrap();
 
         // Both should have the same range
         assert_eq!(merged.start, direct.start);
@@ -4232,17 +4232,17 @@ mod tests {
     }
 
     #[test]
-    fn test_nullifications_merge_reverse() {
+    fn test_nullification_range_merge_reverse() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 223);
 
         // Create two consecutive ranges
         let first_nullifications = generate_nullifications(&shares, threshold, 80, 84);
-        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+        let first = NullificationRange::from_nullifications(&first_nullifications).unwrap();
 
         let second_nullifications = generate_nullifications(&shares, threshold, 85, 89);
-        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+        let second = NullificationRange::from_nullifications(&second_nullifications).unwrap();
 
         // Merge in reverse order (second.merge(&first))
         let merged = second.merge(&first).unwrap();
@@ -4259,17 +4259,17 @@ mod tests {
     }
 
     #[test]
-    fn test_nullifications_merge_with_gap() {
+    fn test_nullification_range_merge_with_gap() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 224);
 
         // Create two ranges with a gap (90-94 and 96-100, missing 95)
         let first_nullifications = generate_nullifications(&shares, threshold, 90, 94);
-        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+        let first = NullificationRange::from_nullifications(&first_nullifications).unwrap();
 
         let second_nullifications = generate_nullifications(&shares, threshold, 96, 100);
-        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+        let second = NullificationRange::from_nullifications(&second_nullifications).unwrap();
 
         // Merge should fail due to gap
         let result = first.merge(&second);
@@ -4281,17 +4281,17 @@ mod tests {
     }
 
     #[test]
-    fn test_nullifications_merge_overlapping() {
+    fn test_nullification_range_merge_overlapping() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 225);
 
         // Create two overlapping ranges (100-105 and 103-108)
         let first_nullifications = generate_nullifications(&shares, threshold, 100, 105);
-        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+        let first = NullificationRange::from_nullifications(&first_nullifications).unwrap();
 
         let second_nullifications = generate_nullifications(&shares, threshold, 103, 108);
-        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+        let second = NullificationRange::from_nullifications(&second_nullifications).unwrap();
 
         // Merge should fail due to overlap
         let result = first.merge(&second);
@@ -4303,15 +4303,15 @@ mod tests {
     }
 
     #[test]
-    fn test_nullifications_merge_same_range() {
+    fn test_nullification_range_merge_same_range() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 226);
 
         // Create two identical ranges
         let nullifications = generate_nullifications(&shares, threshold, 110, 115);
-        let first = Nullifications::from_nullifications(&nullifications).unwrap();
-        let second = Nullifications::from_nullifications(&nullifications).unwrap();
+        let first = NullificationRange::from_nullifications(&nullifications).unwrap();
+        let second = NullificationRange::from_nullifications(&nullifications).unwrap();
 
         // Merge should fail because they're the same range
         let result = first.merge(&second);
@@ -4319,17 +4319,17 @@ mod tests {
     }
 
     #[test]
-    fn test_nullifications_merge_single_views() {
+    fn test_nullification_range_merge_single_views() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 227);
 
         // Create two two-view nullifications that are consecutive
         let first_nullifications = generate_nullifications(&shares, threshold, 120, 121);
-        let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
+        let first = NullificationRange::from_nullifications(&first_nullifications).unwrap();
 
         let second_nullifications = generate_nullifications(&shares, threshold, 122, 123);
-        let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
+        let second = NullificationRange::from_nullifications(&second_nullifications).unwrap();
 
         // Merge them
         let merged = first.merge(&second).unwrap();
@@ -4341,20 +4341,20 @@ mod tests {
     }
 
     #[test]
-    fn test_nullifications_merge_multiple() {
+    fn test_nullification_range_merge_multiple() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 228);
 
         // Create multiple consecutive ranges and merge them sequentially
         let range1_nulls = generate_nullifications(&shares, threshold, 130, 134);
-        let range1 = Nullifications::from_nullifications(&range1_nulls).unwrap();
+        let range1 = NullificationRange::from_nullifications(&range1_nulls).unwrap();
 
         let range2_nulls = generate_nullifications(&shares, threshold, 135, 139);
-        let range2 = Nullifications::from_nullifications(&range2_nulls).unwrap();
+        let range2 = NullificationRange::from_nullifications(&range2_nulls).unwrap();
 
         let range3_nulls = generate_nullifications(&shares, threshold, 140, 144);
-        let range3 = Nullifications::from_nullifications(&range3_nulls).unwrap();
+        let range3 = NullificationRange::from_nullifications(&range3_nulls).unwrap();
 
         // Merge range1 and range2
         let merged_1_2 = range1.merge(&range2).unwrap();
@@ -4369,7 +4369,7 @@ mod tests {
 
         // Compare with creating directly
         let all_nullifications = generate_nullifications(&shares, threshold, 130, 144);
-        let direct = Nullifications::from_nullifications(&all_nullifications).unwrap();
+        let direct = NullificationRange::from_nullifications(&all_nullifications).unwrap();
         assert_eq!(merged_all.start, direct.start);
         assert_eq!(merged_all.end, direct.end);
         assert!(direct.verify(NAMESPACE, &identity));
