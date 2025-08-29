@@ -1287,29 +1287,34 @@ impl<V: Variant> NullificationRange<V> {
         NullificationRange::new(start, end, signature)
     }
 
-    /// Appends a single [Nullification] to this aggregated proof.
+    /// Adds a single [Nullification] to this range if it's adjacent (either before or after).
     ///
-    /// The nullification must be for the view immediately following the current end view.
-    /// This method aggregates the new signatures with the existing one.
+    /// The nullification must be for a view immediately before the start or after the end.
+    /// This method aggregates the signatures with the existing one.
     ///
-    /// Returns an error if the view is not consecutive.
-    pub fn append(&mut self, nullification: &Nullification<V>) -> Result<(), Error> {
-        // Check that the new nullification is consecutive
-        if nullification.view != self.end + 1 {
+    /// Returns an error if it's not adjacent.
+    pub fn add(&mut self, nullification: &Nullification<V>) -> Result<(), Error> {
+        if nullification.view == self.end + 1 {
+            // Append case
+            self.end = nullification.view;
+        } else if nullification.view + 1 == self.start {
+            // Prepend case
+            self.start = nullification.view;
+        } else {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::NullificationRange",
-                "nullification must be for the next consecutive view",
+                "nullification to add must be adjacent to the range",
             ));
         }
 
-        // Aggregate the new signatures with the existing one
+        // Aggregate signatures
         let signatures = vec![
             self.signature,
             nullification.view_signature,
             nullification.seed_signature,
         ];
+
         self.signature = aggregate_signatures::<V, _>(&signatures);
-        self.end = nullification.view;
 
         Ok(())
     }
@@ -4103,7 +4108,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullification_range_append() {
+    fn test_nullification_range_add_append() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 219);
@@ -4119,7 +4124,7 @@ mod tests {
 
         // Create and append nullification for view 43
         let next_nullification = generate_nullifications(&shares, threshold, 43, 43);
-        range.append(&next_nullification[0]).unwrap();
+        range.add(&next_nullification[0]).unwrap();
 
         // Verify after append
         assert_eq!(range.start, 40);
@@ -4128,7 +4133,7 @@ mod tests {
 
         // Append view 44
         let next_nullification = generate_nullifications(&shares, threshold, 44, 44);
-        range.append(&next_nullification[0]).unwrap();
+        range.add(&next_nullification[0]).unwrap();
 
         // Verify after second append
         assert_eq!(range.start, 40);
@@ -4137,7 +4142,40 @@ mod tests {
     }
 
     #[test]
-    fn test_nullification_range_append_non_consecutive() {
+    fn test_nullification_range_add_prepend() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 219);
+
+        // Create initial range [41-43]
+        let initial_nullifications = generate_nullifications(&shares, threshold, 41, 43);
+        let mut range = NullificationRange::from_nullifications(&initial_nullifications).unwrap();
+
+        // Verify initial state
+        assert_eq!(range.start, 41);
+        assert_eq!(range.end, 43);
+
+        // Prepend nullification for view 40
+        let prev_nullification = generate_nullifications(&shares, threshold, 40, 40);
+        range.add(&prev_nullification[0]).unwrap();
+
+        // Verify range was prepended
+        assert_eq!(range.start, 40);
+        assert_eq!(range.end, 43);
+        assert!(range.verify(NAMESPACE, &identity));
+
+        // Try to prepend another one at view 39
+        let prev_nullification2 = generate_nullifications(&shares, threshold, 39, 39);
+        range.add(&prev_nullification2[0]).unwrap();
+
+        // Verify range was prepended again
+        assert_eq!(range.start, 39);
+        assert_eq!(range.end, 43);
+        assert!(range.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_nullification_range_add_non_consecutive() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 220);
@@ -4148,7 +4186,7 @@ mod tests {
 
         // Try to append non-consecutive view 54 (skipping 53)
         let non_consecutive = generate_nullifications(&shares, threshold, 54, 54);
-        let result = range.append(&non_consecutive[0]);
+        let result = range.add(&non_consecutive[0]);
 
         // Should fail due to non-consecutive view
         assert!(result.is_err());
@@ -4156,17 +4194,17 @@ mod tests {
 
         // Try to append a view that's before the current end
         let before_end = generate_nullifications(&shares, threshold, 51, 51);
-        let result = range.append(&before_end[0]);
+        let result = range.add(&before_end[0]);
         assert!(result.is_err());
 
         // Try to append the same view as current end
         let same_as_end = generate_nullifications(&shares, threshold, 52, 52);
-        let result = range.append(&same_as_end[0]);
+        let result = range.add(&same_as_end[0]);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_nullification_range_append_multiple() {
+    fn test_nullification_range_add_multiple() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 221);
@@ -4178,7 +4216,7 @@ mod tests {
         // Append multiple nullifications sequentially
         for view in 62..=65 {
             let nullification = generate_nullifications(&shares, threshold, view, view);
-            range.append(&nullification[0]).unwrap();
+            range.add(&nullification[0]).unwrap();
         }
 
         // Verify final state
