@@ -19,7 +19,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::union;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
 
@@ -1397,6 +1397,422 @@ impl<V: Variant> Read for NullificationRange<V> {
 impl<V: Variant> EncodeSize for NullificationRange<V> {
     fn encode_size(&self) -> usize {
         UInt(self.start).encode_size() + UInt(self.end).encode_size() + self.signature.encode_size()
+    }
+}
+
+/// Represents either a single nullification or a range of nullifications.
+#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+pub enum NullificationProof<V: Variant> {
+    /// A single nullified view.
+    Single(Nullification<V>),
+    /// A range of consecutive nullified views (at least 2).
+    Range(NullificationRange<V>),
+}
+
+impl<V: Variant> PartialOrd for NullificationProof<V> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<V: Variant> Ord for NullificationProof<V> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let self_view = match self {
+            NullificationProof::Single(n) => n.view,
+            NullificationProof::Range(r) => r.start,
+        };
+        let other_view = match other {
+            NullificationProof::Single(n) => n.view,
+            NullificationProof::Range(r) => r.start,
+        };
+        self_view.cmp(&other_view)
+    }
+}
+
+/// A store that manages both single and range nullification proofs. It automatically
+/// compacts consecutive single nullifications into ranges and merges adjacent ranges for
+/// efficient storage and querying.
+///
+/// Key invariants:
+/// - Single nullifications never overlap with ranges
+/// - No two ranges have the same start view (only the widest range is kept)
+/// - Ranges with different starts can overlap each other
+/// - Compaction occurs when:
+///   - Consecutive singles are added (compacted into a range)
+///   - A range is added (merges with adjacent ranges, replaces narrower ranges with same start)
+/// - Pruning always keeps entire range if any part is >= lowest_active_view
+pub struct Nullifications<V: Variant> {
+    /// Ranges indexed by start view.
+    range: BTreeMap<View, NullificationRange<V>>,
+
+    /// Single nullifications.
+    single: BTreeMap<View, Nullification<V>>,
+
+    /// Lowest view we need to keep.
+    lowest_active_view: View,
+}
+
+impl<V: Variant> Nullifications<V> {
+    /// Creates a new empty [Nullifications] store with the given lowest active view.
+    pub fn new(lowest_active_view: View) -> Self {
+        Self {
+            range: BTreeMap::new(),
+            single: BTreeMap::new(),
+            lowest_active_view,
+        }
+    }
+
+    /// Checks if a specific view is nullified.
+    pub fn is_nullified(&self, view: View) -> bool {
+        // Check single first
+        if self.single.contains_key(&view) {
+            return true;
+        }
+
+        // Check ranges
+        self.is_covered_by_range(view)
+    }
+
+    /// Removes nullifications that are entirely below the given view.
+    pub fn prune(&mut self, view: View) {
+        self.lowest_active_view = view;
+
+        // Remove old singles
+        self.single.retain(|&v, _| v >= view);
+
+        // Remove ranges that are entirely below the threshold
+        self.range.retain(|_, r| r.end >= view);
+    }
+
+    /// Adds a single nullification to the store. Returns false if the nullification was
+    /// discarded for being redundant.
+    pub fn add_single(&mut self, nullification: Nullification<V>) -> bool {
+        let view = nullification.view;
+
+        // Drop if below lowest active view
+        if view < self.lowest_active_view {
+            return false;
+        }
+
+        // Check if already covered by a single or range
+        if self.single.contains_key(&view) || self.is_covered_by_range(view) {
+            return false;
+        }
+
+        // Check if this single can be prepended to a range starting at view+1 (direct lookup)
+        if let Some(mut range) = self.range.remove(&(view + 1)) {
+            range
+                .add(&nullification)
+                .expect("checked that nullification is within range");
+
+            // Check if there's a single at the new start - 1 that can be prepended
+            if view > 0 {
+                if let Some(single) = self.single.remove(&(view - 1)) {
+                    range
+                        .add(&single)
+                        .expect("single is exactly one before range start");
+                }
+            }
+
+            // Check if there's a single at the end + 1 that can be appended
+            if let Some(single) = self.single.remove(&(range.end + 1)) {
+                range
+                    .add(&single)
+                    .expect("single is exactly one after range end");
+            }
+
+            // Insert the updated range at new start
+            let new_start = range.start;
+            self.range.insert(new_start, range);
+            self.try_merge_ranges(new_start);
+            return true;
+        }
+
+        // Check if this single can be appended to a range ending at view-1
+        if view > 1 {
+            // Find the last range that could end at view-1
+            if let Some((&start, _)) = self.range.range(..=view - 2).next_back() {
+                if let Entry::Occupied(mut entry) = self.range.entry(start) {
+                    let range = entry.get_mut();
+                    if range.end == view - 1 {
+                        // This range ends at view-1, we can append to it
+                        range
+                            .add(&nullification)
+                            .expect("checked that nullification is within range");
+
+                        // Check if there's a single at the end + 1 that can be appended
+                        if let Some(single) = self.single.remove(&(range.end + 1)) {
+                            range
+                                .add(&single)
+                                .expect("single is exactly one after range end");
+                        }
+
+                        self.try_merge_ranges(start);
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // If not adjacent to any range, add as single
+        self.single.insert(view, nullification);
+
+        // Try to compact consecutive singles around this view
+        self.try_compact_around(view);
+
+        true
+    }
+
+    /// Adds a nullification range to the store. Returns false if the nullification range
+    /// was discarded for being redundant.
+    pub fn add_range(&mut self, mut range: NullificationRange<V>) -> bool {
+        // Drop if entirely below lowest active view
+        if range.end < self.lowest_active_view {
+            return false;
+        }
+
+        // Check if this range is already fully covered by an existing range
+        for existing in self.range.range(..=range.start).rev().map(|(_, r)| r) {
+            if existing.end < range.end {
+                // This and all earlier ranges can't cover our range
+                break;
+            }
+            if existing.end >= range.end {
+                // This range fully covers the new range
+                return false;
+            }
+        }
+
+        // Check for adjacent singles to merge with
+        if range.start > 0 {
+            if let Some(single) = self.single.remove(&(range.start - 1)) {
+                range
+                    .add(&single)
+                    .expect("single is exactly one before range start");
+            }
+        }
+
+        if let Some(single) = self.single.remove(&(range.end + 1)) {
+            range
+                .add(&single)
+                .expect("single is exactly one after range end");
+        }
+
+        // Remove any singles that fall within this range
+        let to_remove: Vec<_> = self
+            .single
+            .range(range.start..=range.end)
+            .map(|(&v, _)| v)
+            .collect();
+
+        for view in to_remove {
+            self.single.remove(&view);
+        }
+
+        // Insert the new range (replaces any narrower range with same start)
+        let start = range.start;
+        self.range.insert(range.start, range);
+
+        // Try to merge with adjacent ranges
+        self.try_merge_ranges(start);
+
+        true
+    }
+
+    /// Gets a nullification proof for a specific view if it exists.
+    pub fn get(&self, view: View) -> Option<NullificationProof<V>> {
+        // Check single first
+        if let Some(nullification) = self.single.get(&view) {
+            return Some(NullificationProof::Single(nullification.clone()));
+        }
+
+        // Find the smallest range containing this view
+        self.range
+            .range(..=view)
+            .rev()
+            .find(|(_, range)| range.end >= view)
+            .map(|(_, range)| NullificationProof::Range(range.clone()))
+    }
+
+    /// Returns proofs covering the entire range [start, end], or `None` if incomplete.
+    pub fn range(&self, start: View, end: View) -> Option<BTreeSet<NullificationProof<V>>> {
+        if start > end {
+            return None;
+        }
+
+        let mut proofs = BTreeSet::new();
+
+        // Collect all overlapping ranges, any range starting at or before `end` could
+        // potentially overlap
+        for range in self.range.range(..=end).map(|(_, r)| r) {
+            if range.end >= start {
+                proofs.insert(NullificationProof::Range(range.clone()));
+            }
+        }
+
+        // Collect all singles in the range
+        for (_, nullification) in self.single.range(start..=end) {
+            proofs.insert(NullificationProof::Single(nullification.clone()));
+        }
+
+        // Check if we have complete coverage
+        let mut covered = BTreeSet::new();
+        for proof in &proofs {
+            match proof {
+                NullificationProof::Single(n) => {
+                    if n.view >= start && n.view <= end {
+                        covered.insert(n.view);
+                    }
+                }
+                NullificationProof::Range(r) => {
+                    let range_start = r.start.max(start);
+                    let range_end = r.end.min(end);
+                    covered.extend(range_start..=range_end);
+                }
+            }
+        }
+
+        if covered.len() != (end - start + 1) as usize {
+            return None;
+        }
+
+        Some(proofs)
+    }
+
+    /// Returns the gaps (missing nullifications) in the range [start, end].
+    pub fn gaps(&self, start: View, end: View) -> Vec<(View, View)> {
+        if start > end {
+            return Vec::new();
+        }
+
+        let mut covered = BTreeSet::new();
+
+        // Add covered views from ranges
+        for range in self.range.range(..=end).map(|(_, r)| r) {
+            if range.end >= start {
+                let range_start = range.start.max(start);
+                let range_end = range.end.min(end);
+                covered.extend(range_start..=range_end);
+            }
+        }
+
+        // Add covered views from singles
+        covered.extend(self.single.range(start..=end).map(|(v, _)| *v));
+
+        // If everything is covered, no gaps
+        if covered.len() == (end - start + 1) as usize {
+            return Vec::new();
+        }
+
+        // Find gaps using the covered set
+        let mut gaps = Vec::new();
+        let mut current = start;
+
+        for &view in &covered {
+            if view > current {
+                gaps.push((current, view - 1));
+            }
+            current = view + 1;
+        }
+
+        // Handle final gap
+        if current <= end {
+            gaps.push((current, end));
+        }
+
+        gaps
+    }
+
+    /// Checks if a view is covered by any range.
+    fn is_covered_by_range(&self, view: View) -> bool {
+        self.range
+            .range(..=view)
+            .rev()
+            .any(|(_, range)| range.end >= view)
+    }
+
+    /// Tries to compact consecutive single nullifications around a view.
+    fn try_compact_around(&mut self, view: View) {
+        // Find the extent of consecutive nullifications including this view
+        let mut start = view;
+        let mut end = view;
+
+        // Extend backwards
+        while start > 0 && self.single.contains_key(&(start - 1)) {
+            start -= 1;
+        }
+
+        // Extend forwards
+        while self.single.contains_key(&(end + 1)) {
+            end += 1;
+        }
+
+        // Need at least 2 consecutive to compress
+        if end - start + 1 < 2 {
+            return;
+        }
+
+        // Collect the nullifications to compress
+        let mut nullifications = Vec::new();
+        for v in start..=end {
+            if let Some(n) = self.single.remove(&v) {
+                nullifications.push(n);
+            }
+        }
+
+        // Create and insert range
+        let range = NullificationRange::from_nullifications(&nullifications)
+            .expect("checked to be contiguous");
+
+        let start = range.start;
+        self.range.insert(range.start, range);
+
+        // Try to merge with adjacent ranges
+        self.try_merge_ranges(start);
+    }
+
+    /// Tries to merge a range with adjacent ranges.
+    fn try_merge_ranges(&mut self, mut start: View) {
+        // NOTE: This could have been written more cleanly using recursion, but it's
+        // intentionally done iteratively for safety
+        loop {
+            // Get current range and its end
+            let current_end = match self.range.get(&start) {
+                Some(r) => r.end,
+                None => return,
+            };
+
+            // Try to merge with next range first
+            let next_start = current_end + 1;
+            if self.range.contains_key(&next_start) {
+                let current = self.range.remove(&start).unwrap();
+                let next = self.range.remove(&next_start).unwrap();
+
+                let merged = current.merge(&next).expect("confirmed to be consecutive");
+                self.range.insert(merged.start, merged);
+                continue; // Keep trying to merge
+            }
+
+            // Try to merge with previous range
+            if start > 0 {
+                // Find the last range before start
+                if let Some((&prev_start, _)) = self.range.range(..start).next_back() {
+                    let prev_end = self.range.get(&prev_start).unwrap().end;
+                    if prev_end + 1 == start {
+                        let prev = self.range.remove(&prev_start).unwrap();
+                        let current = self.range.remove(&start).unwrap();
+
+                        let merged = prev.merge(&current).expect("confirmed to be consecutive");
+                        start = merged.start;
+                        self.range.insert(merged.start, merged);
+                        continue; // Keep trying to merge
+                    }
+                }
+            }
+
+            // No more merges possible
+            break;
+        }
     }
 }
 
