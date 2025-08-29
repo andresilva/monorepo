@@ -1272,6 +1272,33 @@ impl<V: Variant> Nullifications<V> {
         })
     }
 
+    /// Appends a single [Nullification] to this aggregated proof.
+    ///
+    /// The nullification must be for the view immediately following the current end view.
+    /// This method aggregates the new signatures with the existing one.
+    ///
+    /// Returns an error if the view is not consecutive.
+    pub fn append(&mut self, nullification: &Nullification<V>) -> Result<(), Error> {
+        // Check that the new nullification is consecutive
+        if nullification.view != self.end + 1 {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::Nullifications",
+                "nullification must be for the next consecutive view",
+            ));
+        }
+
+        // Aggregate the new signatures with the existing one
+        let signatures = vec![
+            self.signature,
+            nullification.view_signature,
+            nullification.seed_signature,
+        ];
+        self.signature = aggregate_signatures::<V, _>(&signatures);
+        self.end = nullification.view;
+
+        Ok(())
+    }
+
     /// Verifies the aggregated signature for this range of nullifications.
     ///
     /// This function verifies that the signature is valid for all nullification
@@ -3983,5 +4010,101 @@ mod tests {
         // Should fail due to invalid bounds
         let result = Nullifications::<MinSig>::read(&mut buf.freeze());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nullifications_append() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 219);
+
+        // Create initial nullifications for views 40-42
+        let initial_nullifications = generate_nullifications(&shares, threshold, 40, 42);
+        let mut compressed = Nullifications::from_nullifications(&initial_nullifications).unwrap();
+
+        // Verify initial state
+        assert_eq!(compressed.start, 40);
+        assert_eq!(compressed.end, 42);
+        assert!(compressed.verify(NAMESPACE, &identity));
+
+        // Create and append nullification for view 43
+        let next_nullification = generate_nullifications(&shares, threshold, 43, 43);
+        compressed.append(&next_nullification[0]).unwrap();
+
+        // Verify after append
+        assert_eq!(compressed.start, 40);
+        assert_eq!(compressed.end, 43);
+        assert!(compressed.verify(NAMESPACE, &identity));
+
+        // Append view 44
+        let next_nullification = generate_nullifications(&shares, threshold, 44, 44);
+        compressed.append(&next_nullification[0]).unwrap();
+
+        // Verify after second append
+        assert_eq!(compressed.start, 40);
+        assert_eq!(compressed.end, 44);
+        assert!(compressed.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_nullifications_append_non_consecutive() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 220);
+
+        // Create initial nullifications for views 50-52
+        let initial_nullifications = generate_nullifications(&shares, threshold, 50, 52);
+        let mut compressed = Nullifications::from_nullifications(&initial_nullifications).unwrap();
+
+        // Try to append non-consecutive view 54 (skipping 53)
+        let non_consecutive = generate_nullifications(&shares, threshold, 54, 54);
+        let result = compressed.append(&non_consecutive[0]);
+
+        // Should fail due to non-consecutive view
+        assert!(result.is_err());
+        assert_eq!(compressed.end, 52); // End should remain unchanged
+
+        // Try to append a view that's before the current end
+        let before_end = generate_nullifications(&shares, threshold, 51, 51);
+        let result = compressed.append(&before_end[0]);
+        assert!(result.is_err());
+
+        // Try to append the same view as current end
+        let same_as_end = generate_nullifications(&shares, threshold, 52, 52);
+        let result = compressed.append(&same_as_end[0]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nullifications_append_multiple() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (identity, _, shares) = generate_test_data(n_validators, threshold, 221);
+
+        // Start with a single nullification
+        let initial = generate_nullifications(&shares, threshold, 60, 60);
+        let mut compressed = Nullifications::from_nullifications(&initial).unwrap();
+
+        // Append multiple nullifications sequentially
+        for view in 61..=65 {
+            let nullification = generate_nullifications(&shares, threshold, view, view);
+            compressed.append(&nullification[0]).unwrap();
+        }
+
+        // Verify final state
+        assert_eq!(compressed.start, 60);
+        assert_eq!(compressed.end, 65);
+        assert!(compressed.verify(NAMESPACE, &identity));
+
+        // Compare with creating directly from all nullifications
+        let all_nullifications = generate_nullifications(&shares, threshold, 60, 65);
+        let direct = Nullifications::from_nullifications(&all_nullifications).unwrap();
+
+        // Both should have the same range
+        assert_eq!(compressed.start, direct.start);
+        assert_eq!(compressed.end, direct.end);
+
+        // Both should verify correctly
+        assert!(direct.verify(NAMESPACE, &identity));
     }
 }
