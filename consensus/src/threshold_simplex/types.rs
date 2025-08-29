@@ -1197,6 +1197,9 @@ impl<V: Variant> Seedable<V> for Nullification<V> {
 /// Nullifications represents an aggregated proof of multiple consecutive nullified views.
 /// It contains a single BLS signature that can verify a contiguous range `[start..=end]`
 /// of nullifications.
+///
+/// This always represents at least two views (i.e., `start < end`). A single nullified
+/// view should use [Nullification] instead.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullifications<V: Variant> {
     /// The first view in the nullified range.
@@ -1210,12 +1213,20 @@ pub struct Nullifications<V: Variant> {
 impl<V: Variant> Nullifications<V> {
     /// Creates a new aggregated nullifications proof with the given range and aggregated
     /// signature.
-    pub fn new(start: View, end: View, signature: V::Signature) -> Self {
-        Nullifications {
+    ///
+    /// Returns an error if start >= end (ranges must contain at least 2 views).
+    pub fn new(start: View, end: View, signature: V::Signature) -> Result<Self, Error> {
+        if start >= end {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::Nullifications",
+                "start must be < end (range must contain at least 2 views)",
+            ));
+        }
+        Ok(Nullifications {
             start,
             end,
             signature,
-        }
+        })
     }
 
     /// Creates a [Nullifications] from a slice of individual [Nullification] instances.
@@ -1232,6 +1243,14 @@ impl<V: Variant> Nullifications<V> {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::Nullifications",
                 "nullifications slice cannot be empty",
+            ));
+        }
+
+        // Reject single nullification
+        if nullifications.len() == 1 {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::Nullifications",
+                "cannot create Nullifications from single view",
             ));
         }
 
@@ -1265,11 +1284,7 @@ impl<V: Variant> Nullifications<V> {
         // Aggregate all signatures into one
         let signature = aggregate_signatures::<V, _>(&signatures);
 
-        Ok(Nullifications {
-            start,
-            end,
-            signature,
-        })
+        Nullifications::new(start, end, signature)
     }
 
     /// Appends a single [Nullification] to this aggregated proof.
@@ -1310,21 +1325,13 @@ impl<V: Variant> Nullifications<V> {
         // Forward merge
         if self.end + 1 == other.start {
             let signature = aggregate_signatures::<V, _>(&[self.signature, other.signature]);
-            return Ok(Nullifications {
-                start: self.start,
-                end: other.end,
-                signature,
-            });
+            return Nullifications::new(self.start, other.end, signature);
         }
 
         // Reverse merge
         if other.end + 1 == self.start {
             let signature = aggregate_signatures::<V, _>(&[other.signature, self.signature]);
-            return Ok(Nullifications {
-                start: other.start,
-                end: self.end,
-                signature,
-            });
+            return Nullifications::new(other.start, self.end, signature);
         }
 
         // Ranges are not consecutive
@@ -1339,10 +1346,6 @@ impl<V: Variant> Nullifications<V> {
     /// This function verifies that the signature is valid for all nullification
     /// and seed messages in the range [start..=end].
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
-        if self.start > self.end {
-            return false;
-        }
-
         // Build the list of messages to verify.
         // Each view has two messages: one for nullification, one for seed.
         let nullify_namespace = nullify_namespace(namespace);
@@ -1374,19 +1377,15 @@ impl<V: Variant> Read for Nullifications<V> {
         let start = UInt::read(reader)?.into();
         let end = UInt::read(reader)?.into();
 
-        if start > end {
+        if start >= end {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::Nullifications",
-                "start must be <= end",
+                "start must be < end (range must contain at least 2 views)",
             ));
         }
 
         let signature = V::Signature::read(reader)?;
-        Ok(Nullifications {
-            start,
-            end,
-            signature,
-        })
+        Nullifications::new(start, end, signature)
     }
 }
 
@@ -3995,56 +3994,112 @@ mod tests {
 
         // Test verification with wrong namespace
         assert!(!compressed.verify(b"wrong", &identity));
-
-        // Test invalid bounds (start > end)
-        let invalid = Nullifications::<MinSig>::new(32, 30, compressed.signature);
-        assert!(!invalid.verify(NAMESPACE, &identity));
     }
 
     #[test]
-    fn test_nullifications_single_view() {
+    fn test_nullifications_enforce_range() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (identity, _, shares) = generate_test_data(n_validators, threshold, 218);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 218);
 
-        // Create a single nullification for view 100
-        let nullifications = generate_nullifications(&shares, threshold, 100, 100);
-        assert_eq!(nullifications.len(), 1);
+        // Test that single view is rejected
+        let single_nullification = generate_nullifications(&shares, threshold, 100, 100);
+        assert_eq!(single_nullification.len(), 1);
+        let result = Nullifications::from_nullifications(&single_nullification);
+        assert!(result.is_err());
 
-        // Create compressed nullifications for a single view
-        let compressed = Nullifications::from_nullifications(&nullifications).unwrap();
+        // Test that two views work
+        let two_nullifications = generate_nullifications(&shares, threshold, 100, 101);
+        assert_eq!(two_nullifications.len(), 2);
+        let result = Nullifications::from_nullifications(&two_nullifications);
+        assert!(result.is_ok());
+        let compressed = result.unwrap();
         assert_eq!(compressed.start, 100);
-        assert_eq!(compressed.end, 100);
+        assert_eq!(compressed.end, 101);
+    }
 
-        // Verify it works correctly
-        assert!(compressed.verify(NAMESPACE, &identity));
+    #[test]
+    fn test_nullifications_new_invalid_range() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 219);
 
-        // Test encoding/decoding
-        let encoded = compressed.encode();
-        let decoded = Nullifications::<MinSig>::decode(encoded).unwrap();
-        assert_eq!(decoded.start, 100);
-        assert_eq!(decoded.end, 100);
-        assert_eq!(decoded.signature, compressed.signature);
+        // Create a dummy signature
+        let nullifies: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 100))
+            .collect();
+        let view_partials = nullifies.iter().map(|n| &n.view_signature);
+        let signature = threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
 
-        // Verify decoded version also works
-        assert!(decoded.verify(NAMESPACE, &identity));
+        // This should return an error
+        let result = Nullifications::<MinSig>::new(100, 100, signature);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nullifications_new_start_greater_than_end() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 220);
+
+        // Create a dummy signature
+        let nullifies: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 100))
+            .collect();
+        let view_partials = nullifies.iter().map(|n| &n.view_signature);
+        let signature = threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
+
+        // This should return an error
+        let result = Nullifications::<MinSig>::new(100, 99, signature);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_nullifications_read_invalid_bounds() {
         use bytes::BytesMut;
 
-        // Create a buffer with invalid bounds (start > end)
+        // Create a valid signature for testing
+        let n_validators = 5;
+        let threshold = quorum(n_validators);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 221);
+        let nullifies: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 100))
+            .collect();
+        let view_partials = nullifies.iter().map(|n| &n.view_signature);
+        let signature = threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
+
+        // Test start > end
         let mut buf = BytesMut::new();
         UInt(10u64).write(&mut buf);
         UInt(5u64).write(&mut buf);
-
-        // Add a dummy signature bytes (will fail before checking it)
-        buf.extend_from_slice(&[0u8; 96]);
-
-        // Should fail due to invalid bounds
+        signature.write(&mut buf);
         let result = Nullifications::<MinSig>::read(&mut buf.freeze());
         assert!(result.is_err());
+
+        // Test start == end (single view, should also fail)
+        let mut buf = BytesMut::new();
+        UInt(10u64).write(&mut buf);
+        UInt(10u64).write(&mut buf);
+        signature.write(&mut buf);
+        let result = Nullifications::<MinSig>::read(&mut buf.freeze());
+        assert!(result.is_err());
+
+        // Test valid range (start < end)
+        let mut buf = BytesMut::new();
+        UInt(10u64).write(&mut buf);
+        UInt(15u64).write(&mut buf);
+        signature.write(&mut buf);
+        let result = Nullifications::<MinSig>::read(&mut buf.freeze());
+        assert!(result.is_ok());
+        let nullifications = result.unwrap();
+        assert_eq!(nullifications.start, 10);
+        assert_eq!(nullifications.end, 15);
     }
 
     #[test]
@@ -4116,12 +4171,12 @@ mod tests {
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 221);
 
-        // Start with a single nullification
-        let initial = generate_nullifications(&shares, threshold, 60, 60);
+        // Start with two nullifications
+        let initial = generate_nullifications(&shares, threshold, 60, 61);
         let mut compressed = Nullifications::from_nullifications(&initial).unwrap();
 
         // Append multiple nullifications sequentially
-        for view in 61..=65 {
+        for view in 62..=65 {
             let nullification = generate_nullifications(&shares, threshold, view, view);
             compressed.append(&nullification[0]).unwrap();
         }
@@ -4269,11 +4324,11 @@ mod tests {
         let threshold = quorum(n_validators);
         let (identity, _, shares) = generate_test_data(n_validators, threshold, 227);
 
-        // Create two single-view nullifications that are consecutive
-        let first_nullifications = generate_nullifications(&shares, threshold, 120, 120);
+        // Create two two-view nullifications that are consecutive
+        let first_nullifications = generate_nullifications(&shares, threshold, 120, 121);
         let first = Nullifications::from_nullifications(&first_nullifications).unwrap();
 
-        let second_nullifications = generate_nullifications(&shares, threshold, 121, 121);
+        let second_nullifications = generate_nullifications(&shares, threshold, 122, 123);
         let second = Nullifications::from_nullifications(&second_nullifications).unwrap();
 
         // Merge them
@@ -4281,7 +4336,7 @@ mod tests {
 
         // Verify merged range
         assert_eq!(merged.start, 120);
-        assert_eq!(merged.end, 121);
+        assert_eq!(merged.end, 123);
         assert!(merged.verify(NAMESPACE, &identity));
     }
 
