@@ -1196,7 +1196,8 @@ impl<V: Variant> Seedable<V> for Nullification<V> {
 
 /// Represents an aggregated proof of multiple consecutive nullified views. It contains a
 /// single BLS signature that can verify a contiguous range `[start..=end]` of
-/// nullifications.
+/// nullifications as well as the recovered threshold seed signature for the terminal
+/// view.
 ///
 /// This always represents at least two views (i.e., `start < end`). A single nullified
 /// view should use [Nullification] instead.
@@ -1208,14 +1209,22 @@ pub struct NullificationRange<V: Variant> {
     pub end: View,
     /// The aggregated signature covering all nullifications and seeds in the range.
     pub signature: V::Signature,
+    /// Threshold seed signature for the terminal view. This is the seed needed to safely
+    /// enter `end + 1` after applying the range.
+    pub end_seed_signature: V::Signature,
 }
 
 impl<V: Variant> NullificationRange<V> {
-    /// Creates a new aggregated nullifications proof with the given range and aggregated
-    /// signature.
+    /// Creates a new aggregated nullifications proof with the given range, aggregated
+    /// nullify/seed signature, and terminal seed signature.
     ///
-    /// Returns an error if start >= end (ranges must contain at least 2 views).
-    pub fn new(start: View, end: View, signature: V::Signature) -> Result<Self, Error> {
+    /// Returns an error if `start >= end` (ranges must contain at least two views).
+    pub fn new(
+        start: View,
+        end: View,
+        signature: V::Signature,
+        end_seed_signature: V::Signature,
+    ) -> Result<Self, Error> {
         if start >= end {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::NullificationRange",
@@ -1226,6 +1235,7 @@ impl<V: Variant> NullificationRange<V> {
             start,
             end,
             signature,
+            end_seed_signature,
         })
     }
 
@@ -1259,17 +1269,15 @@ impl<V: Variant> NullificationRange<V> {
 
         let start = nullifications
             .first()
-            .expect("nullifications has been verified to be non-empty")
-            .view;
+            .expect("nullifications has been verified to be non-empty");
 
         let end = nullifications
             .last()
-            .expect("nullifications has been verified to be non-empty")
-            .view;
+            .expect("nullifications has been verified to be non-empty");
 
         for (i, nullification) in nullifications.iter().enumerate() {
             // Check that views are consecutive
-            if nullification.view != start + i as u64 {
+            if nullification.view != start.view + i as u64 {
                 return Err(Error::Invalid(
                     "consensus::threshold_simplex::NullificationRange",
                     "nullifications must be consecutive",
@@ -1284,7 +1292,7 @@ impl<V: Variant> NullificationRange<V> {
         // Aggregate all signatures into one
         let signature = aggregate_signatures::<V, _>(&signatures);
 
-        NullificationRange::new(start, end, signature)
+        NullificationRange::new(start.view, end.view, signature, end.seed_signature)
     }
 
     /// Adds a single [Nullification] to this range if it's adjacent (either before or after).
@@ -1297,6 +1305,7 @@ impl<V: Variant> NullificationRange<V> {
         if nullification.view == self.end + 1 {
             // Append case
             self.end = nullification.view;
+            self.end_seed_signature = nullification.seed_signature;
         } else if nullification.view + 1 == self.start {
             // Prepend case
             self.start = nullification.view;
@@ -1330,13 +1339,23 @@ impl<V: Variant> NullificationRange<V> {
         // Forward merge
         if self.end + 1 == other.start {
             let signature = aggregate_signatures::<V, _>(&[self.signature, other.signature]);
-            return NullificationRange::new(self.start, other.end, signature);
+            return NullificationRange::new(
+                self.start,
+                other.end,
+                signature,
+                other.end_seed_signature,
+            );
         }
 
         // Reverse merge
         if other.end + 1 == self.start {
             let signature = aggregate_signatures::<V, _>(&[other.signature, self.signature]);
-            return NullificationRange::new(other.start, self.end, signature);
+            return NullificationRange::new(
+                other.start,
+                self.end,
+                signature,
+                self.end_seed_signature,
+            );
         }
 
         // Ranges are not consecutive
@@ -1348,8 +1367,10 @@ impl<V: Variant> NullificationRange<V> {
 
     /// Verifies the aggregated signature for this range of nullifications.
     ///
-    /// This function verifies that the signature is valid for all nullification
-    /// and seed messages in the range [start..=end].
+    /// This ensures the combined signature covers both the nullify and seed
+    /// messages for every view in `[start..=end]`, and also validates the stored
+    /// terminal `end_seed_signature` so the caller can safely advance to
+    /// `end + 1`.
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         // Build the list of messages to verify.
         // Each view has two messages: one for nullification, one for seed.
@@ -1363,7 +1384,20 @@ impl<V: Variant> NullificationRange<V> {
             messages.push((Some(seed_namespace.as_ref()), view_msg.as_ref()));
         }
 
-        aggregate_verify_multiple_messages::<V, _>(identity, &messages, &self.signature, 1).is_ok()
+        if aggregate_verify_multiple_messages::<V, _>(identity, &messages, &self.signature, 1)
+            .is_err()
+        {
+            return false;
+        }
+
+        let end_message = view_message(self.end);
+        verify_message::<V>(
+            identity,
+            Some(seed_namespace.as_ref()),
+            end_message.as_ref(),
+            &self.end_seed_signature,
+        )
+        .is_ok()
     }
 }
 
@@ -1372,6 +1406,7 @@ impl<V: Variant> Write for NullificationRange<V> {
         UInt(self.start).write(writer);
         UInt(self.end).write(writer);
         self.signature.write(writer);
+        self.end_seed_signature.write(writer);
     }
 }
 
@@ -1390,13 +1425,17 @@ impl<V: Variant> Read for NullificationRange<V> {
         }
 
         let signature = V::Signature::read(reader)?;
-        NullificationRange::new(start, end, signature)
+        let end_seed_signature = V::Signature::read(reader)?;
+        NullificationRange::new(start, end, signature, end_seed_signature)
     }
 }
 
 impl<V: Variant> EncodeSize for NullificationRange<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.start).encode_size() + UInt(self.end).encode_size() + self.signature.encode_size()
+        UInt(self.start).encode_size()
+            + UInt(self.end).encode_size()
+            + self.signature.encode_size()
+            + self.end_seed_signature.encode_size()
     }
 }
 
@@ -4363,6 +4402,7 @@ mod tests {
         assert_eq!(range.start, decoded.start);
         assert_eq!(range.end, decoded.end);
         assert_eq!(range.signature, decoded.signature);
+        assert_eq!(range.end_seed_signature, decoded.end_seed_signature);
     }
 
     #[test]
@@ -4378,6 +4418,13 @@ mod tests {
         let range = NullificationRange::from_nullifications(&nullifications).unwrap();
         assert_eq!(range.start, 20);
         assert_eq!(range.end, 23);
+        assert_eq!(
+            range.end_seed_signature,
+            nullifications
+                .last()
+                .expect("range contains at least two entries")
+                .seed_signature,
+        );
 
         // Test empty slice fails
         let empty: Vec<Nullification<MinSig>> = vec![];
@@ -4453,9 +4500,12 @@ mod tests {
             .collect();
         let view_partials = nullifies.iter().map(|n| &n.view_signature);
         let signature = threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
+        let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
+        let end_seed_signature =
+            threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
 
         // This should return an error
-        let result = NullificationRange::<MinSig>::new(100, 100, signature);
+        let result = NullificationRange::<MinSig>::new(100, 100, signature, end_seed_signature);
         assert!(result.is_err());
     }
 
@@ -4473,9 +4523,12 @@ mod tests {
             .collect();
         let view_partials = nullifies.iter().map(|n| &n.view_signature);
         let signature = threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
+        let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
+        let end_seed_signature =
+            threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
 
         // This should return an error
-        let result = NullificationRange::<MinSig>::new(100, 99, signature);
+        let result = NullificationRange::<MinSig>::new(100, 99, signature, end_seed_signature);
         assert!(result.is_err());
     }
 
@@ -4494,12 +4547,16 @@ mod tests {
             .collect();
         let view_partials = nullifies.iter().map(|n| &n.view_signature);
         let signature = threshold_signature_recover::<MinSig, _>(threshold, view_partials).unwrap();
+        let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
+        let end_seed_signature =
+            threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
 
         // Test start > end
         let mut buf = BytesMut::new();
         UInt(10u64).write(&mut buf);
         UInt(5u64).write(&mut buf);
         signature.write(&mut buf);
+        end_seed_signature.write(&mut buf);
         let result = NullificationRange::<MinSig>::read(&mut buf.freeze());
         assert!(result.is_err());
 
@@ -4508,6 +4565,7 @@ mod tests {
         UInt(10u64).write(&mut buf);
         UInt(10u64).write(&mut buf);
         signature.write(&mut buf);
+        end_seed_signature.write(&mut buf);
         let result = NullificationRange::<MinSig>::read(&mut buf.freeze());
         assert!(result.is_err());
 
@@ -4516,11 +4574,13 @@ mod tests {
         UInt(10u64).write(&mut buf);
         UInt(15u64).write(&mut buf);
         signature.write(&mut buf);
+        end_seed_signature.write(&mut buf);
         let result = NullificationRange::<MinSig>::read(&mut buf.freeze());
         assert!(result.is_ok());
         let nullifications = result.unwrap();
         assert_eq!(nullifications.start, 10);
         assert_eq!(nullifications.end, 15);
+        assert_eq!(nullifications.end_seed_signature, end_seed_signature);
     }
 
     #[test]
@@ -4904,6 +4964,7 @@ mod tests {
         let range = store.range.get(&10).unwrap();
         assert_eq!(range.start, 10);
         assert_eq!(range.end, 13);
+        assert_eq!(range.end_seed_signature, nulls[3].seed_signature);
     }
 
     #[test]
@@ -4929,6 +4990,7 @@ mod tests {
         let range = store.range.get(&9).unwrap();
         assert_eq!(range.start, 9);
         assert_eq!(range.end, 12);
+        assert_eq!(range.end_seed_signature, nulls[3].seed_signature);
     }
 
     #[test]
@@ -4954,6 +5016,13 @@ mod tests {
         let range = store.range.get(&10).unwrap();
         assert_eq!(range.start, 10);
         assert_eq!(range.end, 15);
+        assert_eq!(
+            range.end_seed_signature,
+            nulls2
+                .last()
+                .expect("range includes upper bound")
+                .seed_signature,
+        );
     }
 
     #[test]
@@ -4983,6 +5052,13 @@ mod tests {
         let range = store.range.get(&10).unwrap();
         assert_eq!(range.start, 10);
         assert_eq!(range.end, 18);
+        assert_eq!(
+            range.end_seed_signature,
+            nulls3
+                .last()
+                .expect("range includes upper bound")
+                .seed_signature,
+        );
     }
 
     #[test]
@@ -5012,6 +5088,13 @@ mod tests {
         let range = store.range.get(&10).unwrap();
         assert_eq!(range.start, 10);
         assert_eq!(range.end, 20);
+        assert_eq!(
+            range.end_seed_signature,
+            nulls3
+                .last()
+                .expect("range includes upper bound")
+                .seed_signature,
+        );
     }
 
     #[test]
