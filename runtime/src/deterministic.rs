@@ -33,7 +33,7 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::signal::{Signal, Stopper},
-    AbortToken, Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
+    AbortHandleGuard, Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
@@ -679,7 +679,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    children: Arc<Mutex<Vec<AbortToken>>>,
+    children: Arc<Mutex<Vec<AbortHandleGuard>>>,
 }
 
 impl Context {
@@ -874,8 +874,8 @@ impl crate::Spawner for Context {
         let child_handle = self.spawn(f);
 
         // Register this child with the parent
-        if let Some(abort_token) = child_handle.abort_token() {
-            parent_children.lock().unwrap().push(abort_token);
+        if let Some(abort_handle) = child_handle.abort_handle() {
+            parent_children.lock().unwrap().push(abort_handle);
         }
 
         child_handle

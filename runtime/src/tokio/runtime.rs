@@ -15,7 +15,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, AbortToken},
+    utils::{signal::Stopper, AbortHandleGuard},
     Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -371,7 +371,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    children: Arc<Mutex<Vec<AbortToken>>>,
+    children: Arc<Mutex<Vec<AbortHandleGuard>>>,
 }
 
 impl Context {
@@ -466,8 +466,8 @@ impl crate::Spawner for Context {
         let child_handle = self.spawn(f);
 
         // Register this child with the parent
-        if let Some(abort_token) = child_handle.abort_token() {
-            parent_children.lock().unwrap().push(abort_token);
+        if let Some(abort_handle) = child_handle.abort_handle() {
+            parent_children.lock().unwrap().push(abort_handle);
         }
 
         child_handle

@@ -18,7 +18,7 @@ pub mod buffer;
 pub mod signal;
 
 mod handle;
-pub(crate) use handle::AbortToken;
+pub(crate) use handle::AbortHandleGuard;
 pub use handle::Handle;
 
 /// Yield control back to the runtime.

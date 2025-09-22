@@ -14,32 +14,6 @@ use std::{
 };
 use tracing::error;
 
-/// A wrapper around `AbortHandle` that also decrements the running gauge exactly once.
-#[derive(Clone)]
-pub(crate) struct AbortToken {
-    inner: AbortHandle,
-    running: Gauge,
-    once: Arc<Once>,
-}
-
-impl AbortToken {
-    pub(crate) fn new(inner: AbortHandle, running: Gauge, once: Arc<Once>) -> Self {
-        Self {
-            inner,
-            running,
-            once,
-        }
-    }
-
-    /// Abort the associated task and decrement the running gauge immediately.
-    pub(crate) fn abort(&self) {
-        self.inner.abort();
-        self.once.call_once(|| {
-            self.running.dec();
-        });
-    }
-}
-
 /// Handle to a spawned task.
 pub struct Handle<T>
 where
@@ -48,8 +22,7 @@ where
     aborter: Option<AbortHandle>,
     receiver: oneshot::Receiver<Result<T, Error>>,
 
-    running: Gauge,
-    once: Arc<Once>,
+    guard: Arc<HandleGuard>,
 }
 
 impl<T> Handle<T>
@@ -60,31 +33,25 @@ where
         f: F,
         running: Gauge,
         catch_panic: bool,
-        children: Arc<Mutex<Vec<AbortToken>>>,
+        children: Arc<Mutex<Vec<AbortHandleGuard>>>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
     {
-        // Increment running counter
-        running.inc();
-
         // Initialize channels to handle result/abort
-        let once = Arc::new(Once::new());
         let (sender, receiver) = oneshot::channel();
         let (aborter, abort_registration) = AbortHandle::new_pair();
+        let guard = HandleGuard::new(running);
 
         // Wrap the future to handle panics
         let wrapped = {
-            let once = once.clone();
-            let running = running.clone();
+            let guard = guard.clone();
             async move {
                 // Run future
                 let result = AssertUnwindSafe(f).catch_unwind().await;
 
-                // Decrement running counter
-                once.call_once(|| {
-                    running.dec();
-                });
+                // Mark the task as finished
+                guard.finish();
 
                 // Handle result
                 let result = match result {
@@ -114,9 +81,7 @@ where
             Self {
                 aborter: Some(aborter),
                 receiver,
-
-                running,
-                once,
+                guard,
             },
         )
     }
@@ -125,25 +90,19 @@ where
     where
         F: FnOnce() -> T + Send + 'static,
     {
-        // Increment the running tasks gauge
-        running.inc();
-
         // Initialize channel to handle result
-        let once = Arc::new(Once::new());
         let (sender, receiver) = oneshot::channel();
+        let guard = HandleGuard::new(running);
 
         // Wrap the closure with panic handling
         let f = {
-            let once = once.clone();
-            let running = running.clone();
+            let guard = guard.clone();
             move || {
                 // Run blocking task
                 let result = catch_unwind(AssertUnwindSafe(f));
 
-                // Decrement running counter
-                once.call_once(|| {
-                    running.dec();
-                });
+                // Mark the task as finished
+                guard.finish();
 
                 // Handle result
                 let result = match result {
@@ -167,9 +126,7 @@ where
             Self {
                 aborter: None,
                 receiver,
-
-                running,
-                once,
+                guard,
             },
         )
     }
@@ -182,17 +139,15 @@ where
         };
         aborter.abort();
 
-        // Decrement running counter
-        self.once.call_once(|| {
-            self.running.dec();
-        });
+        // Mark the task as finished
+        self.guard.finish();
     }
 
-    /// Returns an [AbortToken] that can be used to abort the task.
-    pub(crate) fn abort_token(&self) -> Option<AbortToken> {
+    /// Returns an [AbortHandleGuard] that can be used to abort the task.
+    pub(crate) fn abort_handle(&self) -> Option<AbortHandleGuard> {
         self.aborter
             .clone()
-            .map(|inner| AbortToken::new(inner, self.running.clone(), self.once.clone()))
+            .map(|inner| AbortHandleGuard::new(inner, self.guard.clone()))
     }
 }
 
@@ -205,25 +160,68 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.receiver).poll(cx) {
             Poll::Ready(Ok(Ok(value))) => {
-                self.once.call_once(|| {
-                    self.running.dec();
-                });
+                self.guard.finish();
                 Poll::Ready(Ok(value))
             }
             Poll::Ready(Ok(Err(err))) => {
-                self.once.call_once(|| {
-                    self.running.dec();
-                });
+                self.guard.finish();
                 Poll::Ready(Err(err))
             }
             Poll::Ready(Err(_)) => {
-                self.once.call_once(|| {
-                    self.running.dec();
-                });
+                self.guard.finish();
                 Poll::Ready(Err(Error::Closed))
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+/// Tracks the lifecycle of a spawned task so completion logic runs exactly once.
+struct HandleGuard {
+    running: Gauge,
+    once: Once,
+}
+
+impl HandleGuard {
+    fn new(running: Gauge) -> Arc<Self> {
+        let guard = Arc::new(Self {
+            running,
+            once: Once::new(),
+        });
+
+        guard.running.inc();
+        guard
+    }
+
+    fn finish(&self) {
+        self.once.call_once(|| {
+            self.running.dec();
+        });
+    }
+}
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// Couples an `AbortHandle` with the task guard so both stay in sync.
+#[derive(Clone)]
+pub(crate) struct AbortHandleGuard {
+    inner: AbortHandle,
+    guard: Arc<HandleGuard>,
+}
+
+impl AbortHandleGuard {
+    fn new(inner: AbortHandle, guard: Arc<HandleGuard>) -> Self {
+        Self { inner, guard }
+    }
+
+    /// Abort the associated task and finalize its guard immediately.
+    fn abort(&self) {
+        self.inner.abort();
+        self.guard.finish();
     }
 }
 
@@ -233,11 +231,11 @@ mod tests {
     use futures::future;
 
     #[test]
-    fn test_abort_token_immediate_gauge_decrement() {
+    fn test_abort_guard_finishes_immediately() {
         // Constants for the test
-        const LABEL: &str = "abort_token_test";
+        const LABEL: &str = "abort_guard_test";
         const RUNTIME_LABEL: &str = "runtime_tasks_running{";
-        const LABEL_FORMAT: &str = "name=\"abort_token_test\"";
+        const LABEL_FORMAT: &str = "name=\"abort_guard_test\"";
         const TASK_FORMAT: &str = "task=\"Future\"";
 
         // Run the test
@@ -261,9 +259,10 @@ mod tests {
             });
             assert!(before_ok, "metrics before abort: {}", before);
 
-            // Abort via AbortToken, which should decrement the gauge immediately
-            let token = handle.abort_token().expect("abort token not present");
-            token.abort();
+            // Abort via AbortHandleGuard, which should finish the task guard
+            // immediately, thus decrementing the gauge
+            let guard = handle.abort_handle().expect("abort handle not present");
+            guard.abort();
 
             // Gauge should now be 0 without requiring an additional poll
             let after = context.encode();
