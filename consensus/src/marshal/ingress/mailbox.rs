@@ -1,14 +1,21 @@
 use crate::{
-    threshold_simplex::types::{Activity, Finalization, Notarization},
+    threshold_simplex::{
+        signing::{
+            Finalization as SigningFinalization, Notarization as SigningNotarization, SigningScheme,
+        },
+        types::Activity,
+    },
     types::Round,
     Block, Reporter,
 };
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_storage::archive;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use std::marker::PhantomData;
 use tracing::error;
 
 /// An identifier for a block request.
@@ -50,7 +57,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<V: Variant, B: Block> {
+pub(crate) enum Message<B: Block, G: SigningScheme<SignerId = u32>> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve the (height, commitment) of a block by its identifier.
     /// The block must be finalized; returns `None` if the block is not finalized.
@@ -97,25 +104,49 @@ pub(crate) enum Message<V: Variant, B: Block> {
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: Notarization<V, B::Commitment>,
+        notarization: SigningNotarization<G, B::Commitment>,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: Finalization<V, B::Commitment>,
+        finalization: SigningFinalization<G, B::Commitment>,
     },
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, B: Block> {
-    sender: mpsc::Sender<Message<V, B>>,
+pub struct Mailbox<
+    V: Variant,
+    B: Block,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> {
+    sender: mpsc::Sender<Message<B, G>>,
+    marker: PhantomData<V>,
 }
 
-impl<V: Variant, B: Block> Mailbox<V, B> {
+impl<
+        V: Variant,
+        B: Block,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    > Mailbox<V, B, G>
+where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+    G::Randomness: Clone + PartialEq,
+{
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
-        Self { sender }
+    pub(crate) fn new(sender: mpsc::Sender<Message<B, G>>) -> Self {
+        Self {
+            sender,
+            marker: PhantomData,
+        }
     }
 
     /// A request to retrieve the information about the highest finalized block.
@@ -126,7 +157,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Message::GetInfo {
+            .send(Message::<B, G>::GetInfo {
                 identifier: identifier.into(),
                 response: tx,
             })
@@ -153,7 +184,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Message::GetBlock {
+            .send(Message::<B, G>::GetBlock {
                 identifier: identifier.into(),
                 response: tx,
             })
@@ -188,7 +219,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Message::Subscribe {
+            .send(Message::<B, G>::Subscribe {
                 round,
                 commitment,
                 response: tx,
@@ -205,7 +236,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn broadcast(&mut self, block: B) {
         if self
             .sender
-            .send(Message::Broadcast { block })
+            .send(Message::<B, G>::Broadcast { block })
             .await
             .is_err()
         {
@@ -217,7 +248,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn verified(&mut self, round: Round, block: B) {
         if self
             .sender
-            .send(Message::Verified { round, block })
+            .send(Message::<B, G>::Verified { round, block })
             .await
             .is_err()
         {
@@ -226,13 +257,27 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 }
 
-impl<V: Variant, B: Block> Reporter for Mailbox<V, B> {
-    type Activity = Activity<V, B::Commitment>;
+impl<
+        V: Variant,
+        B: Block,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    > Reporter for Mailbox<V, B, G>
+where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+    G::Randomness: Clone + PartialEq,
+{
+    type Activity = Activity<V, B::Commitment, G>;
 
     async fn report(&mut self, activity: Self::Activity) {
-        let message = match activity {
-            Activity::Notarization(notarization) => Message::Notarization { notarization },
-            Activity::Finalization(finalization) => Message::Finalization { finalization },
+        let message: Message<B, G> = match activity {
+            Activity::Notarization(notarization) =>
+                Message::Notarization { notarization },
+            Activity::Finalization(finalization) =>
+                Message::Finalization { finalization },
             _ => {
                 // Ignore other activity types
                 return;

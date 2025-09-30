@@ -1,10 +1,22 @@
-use crate::Block;
+use crate::{threshold_simplex::signing::SigningScheme, Block};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::bls12381::primitives::variant::Variant;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<V: Variant, B: Block> {
+pub struct Config<
+    V: Variant,
+    B: Block,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+    G::Randomness: Clone + PartialEq,
+{
     /// The identity of the network.
     pub identity: V::Public,
 
@@ -58,4 +70,7 @@ pub struct Config<V: Variant, B: Block> {
 
     /// Maximum number of blocks to repair at once
     pub max_repair: u64,
+
+    /// Signing scheme for verifying consensus artifacts.
+    pub signing: G,
 }

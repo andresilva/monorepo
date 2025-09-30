@@ -5,7 +5,7 @@ use crate::{
         interesting,
         metrics::{self, Inbound, Outbound},
         min_active,
-        signing::SigningScheme,
+        signing::{SigningScheme, Vote, VoteContext},
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal, Voter,
@@ -76,7 +76,11 @@ struct Round<
         Seed = V::Signature,
         Share = group::Share,
     >,
-    G: SigningScheme,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
 > {
     start: SystemTime,
     supervisor: S,
@@ -139,7 +143,11 @@ impl<
             PublicKey = C,
             Identity = V::Public,
         >,
-        G: SigningScheme,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
     > Round<E, C, V, D, S, G>
 {
     pub fn new(
@@ -279,7 +287,12 @@ impl<
         true
     }
 
-    async fn notarizable(&mut self, threshold: u32, force: bool) -> Option<Notarization<V, D>> {
+    async fn notarizable(
+        &mut self,
+        namespace: &[u8],
+        threshold: u32,
+        force: bool,
+    ) -> Option<Notarization<V, D>> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
@@ -303,17 +316,43 @@ impl<
             "broadcasting notarization"
         );
 
-        // Recover threshold signature
-        let mut timer = self.recover_latency.timer();
-        let (proposals, seeds): (Vec<_>, Vec<_>) = self
+        let votes: Vec<Vote<G>> = self
             .notarizes
             .iter()
-            .map(|notarize| (&notarize.proposal_signature, &notarize.seed_signature))
-            .unzip();
-        let (proposal_signature, seed_signature) =
-            threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
-                .expect("failed to recover threshold signature");
-        timer.observe();
+            .map(|notarize| Vote {
+                signer: notarize.signer(),
+                signature: (
+                    notarize.proposal_signature.value.clone(),
+                    notarize.seed_signature.value.clone(),
+                ),
+            })
+            .collect();
+
+        let mut timer = self.recover_latency.timer();
+        let assembled = self.signing.assemble_certificate::<D>(
+            VoteContext::Notarize {
+                namespace,
+                proposal: &proposal,
+            },
+            &votes,
+        );
+        let (proposal_signature, seed_signature) = match assembled {
+            Ok((proposal_signature, seed_signature)) => {
+                timer.observe();
+                (proposal_signature, seed_signature)
+            }
+            Err(_) => {
+                let (proposals, seeds): (Vec<_>, Vec<_>) = self
+                    .notarizes
+                    .iter()
+                    .map(|notarize| (&notarize.proposal_signature, &notarize.seed_signature))
+                    .unzip();
+                let pair = threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
+                    .expect("failed to recover threshold signature");
+                timer.observe();
+                pair
+            }
+        };
 
         // Construct notarization
         let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
@@ -321,7 +360,12 @@ impl<
         Some(notarization)
     }
 
-    async fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<Nullification<V>> {
+    async fn nullifiable(
+        &mut self,
+        namespace: &[u8],
+        threshold: u32,
+        force: bool,
+    ) -> Option<Nullification<V>> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
@@ -339,17 +383,44 @@ impl<
         }
         debug!(round = ?self.round, "broadcasting nullification");
 
-        // Recover threshold signature
-        let mut timer = self.recover_latency.timer();
-        let (views, seeds): (Vec<_>, Vec<_>) = self
+        // Recover threshold signature via signing scheme with legacy fallback
+        let votes: Vec<Vote<G>> = self
             .nullifies
             .iter()
-            .map(|nullify| (&nullify.view_signature, &nullify.seed_signature))
-            .unzip();
-        let (view_signature, seed_signature) =
-            threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
-                .expect("failed to recover threshold signature");
-        timer.observe();
+            .map(|nullify| Vote {
+                signer: nullify.signer(),
+                signature: (
+                    nullify.view_signature.value.clone(),
+                    nullify.seed_signature.value.clone(),
+                ),
+            })
+            .collect();
+
+        let mut timer = self.recover_latency.timer();
+        let assembled = self.signing.assemble_certificate::<D>(
+            VoteContext::Nullify {
+                namespace,
+                round: self.round,
+            },
+            &votes,
+        );
+        let (view_signature, seed_signature) = match assembled {
+            Ok((view_signature, seed_signature)) => {
+                timer.observe();
+                (view_signature, seed_signature)
+            }
+            Err(_) => {
+                let (views, seeds): (Vec<_>, Vec<_>) = self
+                    .nullifies
+                    .iter()
+                    .map(|nullify| (&nullify.view_signature, &nullify.seed_signature))
+                    .unzip();
+                let pair = threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
+                    .expect("failed to recover threshold signature");
+                timer.observe();
+                pair
+            }
+        };
 
         // Construct nullification
         let nullification = Nullification::new(self.round, view_signature, seed_signature);
@@ -357,7 +428,12 @@ impl<
         Some(nullification)
     }
 
-    async fn finalizable(&mut self, threshold: u32, force: bool) -> Option<Finalization<V, D>> {
+    async fn finalizable(
+        &mut self,
+        namespace: &[u8],
+        threshold: u32,
+        force: bool,
+    ) -> Option<Finalization<V, D>> {
         // Ensure we haven't already broadcast
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
@@ -381,33 +457,69 @@ impl<
             "broadcasting finalization"
         );
 
-        // Recover threshold signature
-        let mut timer = self.recover_latency.timer();
-        let (proposals, seeds): (Vec<_>, Vec<_>) = self
+        let votes: Vec<Vote<G>> = self
             .finalizes
             .iter()
-            .map(|finalize| (&finalize.proposal_signature, &finalize.seed_signature))
-            .unzip();
+            .map(|finalize| Vote {
+                signer: finalize.signer(),
+                signature: (
+                    finalize.proposal_signature.value.clone(),
+                    finalize.seed_signature.value.clone(),
+                ),
+            })
+            .collect();
 
-        // If we have a notarization we'll extract the recovered seed signature (equivalent to what we'd recover)
-        let (proposal_signature, seed_signature) = if let Some(notarization) = &self.notarization {
-            // It is not possible to have a finalization that does not match the notarization proposal. If this
-            // is detected, there is a critical bug or there has been a safety violation.
+        let mut timer = self.recover_latency.timer();
+        let assembled = self.signing.assemble_certificate::<D>(
+            VoteContext::Finalize {
+                namespace,
+                proposal: &proposal,
+            },
+            &votes,
+        );
+
+        let mut pair = match assembled {
+            Ok((proposal_signature, seed_signature)) => {
+                timer.observe();
+                (proposal_signature, seed_signature)
+            }
+            Err(_) => {
+                let (proposals, seeds): (Vec<_>, Vec<_>) = self
+                    .finalizes
+                    .iter()
+                    .map(|finalize| (&finalize.proposal_signature, &finalize.seed_signature))
+                    .unzip();
+
+                if let Some(notarization) = &self.notarization {
+                    assert_eq!(
+                        notarization.proposal, proposal,
+                        "finalization proposal does not match notarization"
+                    );
+
+                    let proposal_signature =
+                        threshold_signature_recover::<V, _>(threshold, proposals)
+                            .expect("failed to recover threshold signature");
+                    timer.observe();
+                    (proposal_signature, notarization.seed_signature.clone())
+                } else {
+                    let result =
+                        threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
+                            .expect("failed to recover threshold signature");
+                    timer.observe();
+                    result
+                }
+            }
+        };
+
+        if let Some(notarization) = &self.notarization {
             assert_eq!(
                 notarization.proposal, proposal,
                 "finalization proposal does not match notarization"
             );
+            pair.1 = notarization.seed_signature.clone();
+        }
 
-            // Recover only the proposal signature
-            let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
-                .expect("failed to recover threshold signature");
-            (proposal_signature, notarization.seed_signature)
-        } else {
-            // Recover both the proposal and seed signatures
-            threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
-                .expect("failed to recover threshold signature")
-        };
-        timer.observe();
+        let (proposal_signature, seed_signature) = pair;
 
         // Construct finalization
         let finalization = Finalization::new(proposal.clone(), proposal_signature, seed_signature);
@@ -434,7 +546,7 @@ pub struct Actor<
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
-    F: Reporter<Activity = Activity<V, D>>,
+    F: Reporter,
     S: ThresholdSupervisor<
         Index = View,
         PublicKey = C::PublicKey,
@@ -443,8 +555,14 @@ pub struct Actor<
         Polynomial = Vec<V::Public>,
         Share = group::Share,
     >,
-    G: SigningScheme,
-> {
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    F: Reporter<Activity = Activity<V, D, G>>,
+{
     context: E,
     crypto: C,
     blocker: B,
@@ -494,7 +612,7 @@ impl<
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<V, D>>,
+        F: Reporter,
         S: ThresholdSupervisor<
             Index = View,
             PublicKey = C::PublicKey,
@@ -503,8 +621,14 @@ impl<
             Polynomial = Vec<V::Public>,
             Share = group::Share,
         >,
-        G: SigningScheme,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
     > Actor<E, C, B, V, D, A, R, F, S, G>
+where
+    F: Reporter<Activity = Activity<V, D, G>>,
 {
     pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S, G>) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
@@ -1164,7 +1288,21 @@ impl<
 
         // Verify notarization
         let identity = self.supervisor.identity();
-        if !notarization.verify(&self.namespace, identity) {
+        let certificate = (
+            notarization.proposal_signature.clone(),
+            notarization.seed_signature.clone(),
+        );
+        let scheme_valid = self
+            .signing
+            .verify_certificate::<D>(
+                VoteContext::Notarize {
+                    namespace: &self.namespace,
+                    proposal: &notarization.proposal,
+                },
+                &certificate,
+            )
+            .is_ok();
+        if !scheme_valid && !notarization.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
@@ -1222,7 +1360,21 @@ impl<
 
         // Verify nullification
         let identity = self.supervisor.identity();
-        if !nullification.verify(&self.namespace, identity) {
+        let certificate = (
+            nullification.view_signature.clone(),
+            nullification.seed_signature.clone(),
+        );
+        let scheme_valid = self
+            .signing
+            .verify_certificate::<D>(
+                VoteContext::Nullify {
+                    namespace: &self.namespace,
+                    round: nullification.round,
+                },
+                &certificate,
+            )
+            .is_ok();
+        if !scheme_valid && !nullification.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
@@ -1305,7 +1457,21 @@ impl<
 
         // Verify finalization
         let identity = self.supervisor.identity();
-        if !finalization.verify(&self.namespace, identity) {
+        let certificate = (
+            finalization.proposal_signature.clone(),
+            finalization.seed_signature.clone(),
+        );
+        let scheme_valid = self
+            .signing
+            .verify_certificate::<D>(
+                VoteContext::Finalize {
+                    namespace: &self.namespace,
+                    proposal: &finalization.proposal,
+                },
+                &certificate,
+            )
+            .is_ok();
+        if !scheme_valid && !finalization.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
@@ -1377,7 +1543,7 @@ impl<
         // Attempt to construct notarization
         let polynomial = self.supervisor.polynomial(view)?;
         let threshold = quorum_from_slice(polynomial);
-        round.notarizable(threshold, force).await
+        round.notarizable(&self.namespace, threshold, force).await
     }
 
     async fn construct_nullification(
@@ -1391,7 +1557,7 @@ impl<
         // Attempt to construct nullification
         let polynomial = self.supervisor.polynomial(view)?;
         let threshold = quorum_from_slice(polynomial);
-        round.nullifiable(threshold, force).await
+        round.nullifiable(&self.namespace, threshold, force).await
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<V, D>> {
@@ -1429,7 +1595,7 @@ impl<
         // Attempt to construct finalization
         let polynomial = self.supervisor.polynomial(view)?;
         let threshold = quorum_from_slice(polynomial);
-        round.finalizable(threshold, force).await
+        round.finalizable(&self.namespace, threshold, force).await
     }
 
     async fn notify<Sp: Sender, Sr: Sender>(
@@ -1493,7 +1659,9 @@ impl<
 
             // Alert application
             self.reporter
-                .report(Activity::Notarization(notarization.clone()))
+                .report(Activity::Notarization(
+                    notarization.as_signing::<G>(),
+                ))
                 .await;
 
             // Broadcast the notarization
@@ -1527,7 +1695,9 @@ impl<
 
             // Alert application
             self.reporter
-                .report(Activity::Nullification(nullification.clone()))
+                .report(Activity::Nullification(
+                    nullification.as_signing::<G>(),
+                ))
                 .await;
 
             // Broadcast the nullification
@@ -1640,7 +1810,9 @@ impl<
 
             // Alert application
             self.reporter
-                .report(Activity::Finalization(finalization.clone()))
+                .report(Activity::Finalization(
+                    finalization.as_signing::<G>(),
+                ))
                 .await;
 
             // Broadcast the finalization
@@ -1741,7 +1913,9 @@ impl<
                         // Handle notarization
                         self.handle_notarization(notarization.clone()).await;
                         self.reporter
-                            .report(Activity::Notarization(notarization))
+                            .report(Activity::Notarization(
+                                notarization.into_signing::<G>(),
+                            ))
                             .await;
 
                         // Update round info
@@ -1767,7 +1941,9 @@ impl<
                         // Handle nullification
                         self.handle_nullification(nullification.clone()).await;
                         self.reporter
-                            .report(Activity::Nullification(nullification))
+                            .report(Activity::Nullification(
+                                nullification.into_signing::<G>(),
+                            ))
                             .await;
 
                         // Update round info
@@ -1795,7 +1971,9 @@ impl<
                         // Handle finalization
                         self.handle_finalization(finalization.clone()).await;
                         self.reporter
-                            .report(Activity::Finalization(finalization))
+                            .report(Activity::Finalization(
+                                finalization.into_signing::<G>(),
+                            ))
                             .await;
 
                         // Update round info

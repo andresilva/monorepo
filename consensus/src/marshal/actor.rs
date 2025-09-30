@@ -10,12 +10,15 @@ use super::{
 };
 use crate::{
     marshal::ingress::mailbox::Identifier as BlockID,
-    threshold_simplex::types::{Finalization, Notarization},
+    threshold_simplex::signing::{
+        Finalization as SigningFinalization, Notarization as SigningNotarization, SigningScheme,
+        VoteContext,
+    },
     types::Round,
     Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Decode, Encode, EncodeSize, Read, Write};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -57,13 +60,25 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
+pub struct Actor<
+    B: Block,
+    E: Rng + Spawner + Metrics + Clock + GClock + Storage,
+    V: Variant,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+    G::Randomness: Clone + PartialEq,
+{
     // ---------- Context ----------
     context: E,
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<V, B>>,
+    mailbox: mpsc::Receiver<Message<B, G>>,
 
     // ---------- Configuration ----------
     // Identity
@@ -89,9 +104,10 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, V>,
+    cache: cache::Manager<E, B, V, G>,
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations_by_height:
+        immutable::Archive<E, B::Commitment, SigningFinalization<G, B::Commitment>>,
     // Finalized blocks stored by height
     finalized_blocks: immutable::Archive<E, B::Commitment, B>,
 
@@ -100,23 +116,59 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
     finalized_height: Gauge,
     // Latest processed height
     processed_height: Gauge,
+    // Signing scheme instance
+    signing: G,
 }
 
-impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
+impl<
+        B: Block,
+        E: Rng + Spawner + Metrics + Clock + GClock + Storage,
+        V: Variant,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    > Actor<B, E, V, G>
+where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+    G::Randomness: Clone + PartialEq,
+{
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
+    pub async fn init(context: E, config: Config<V, B, G>) -> (Self, Mailbox<V, B, G>) {
+        let Config {
+            identity,
+            partition_prefix,
+            mailbox_size,
+            view_retention_timeout,
+            namespace,
+            prunable_items_per_section,
+            immutable_items_per_section,
+            freezer_table_initial_size,
+            freezer_table_resize_frequency,
+            freezer_table_resize_chunk_size,
+            freezer_journal_target_size,
+            freezer_journal_compression,
+            freezer_journal_buffer_pool,
+            replay_buffer,
+            write_buffer,
+            codec_config,
+            max_repair,
+            signing,
+        } = config;
+
         // Initialize cache
         let prunable_config = cache::Config {
-            partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
-            prunable_items_per_section: config.prunable_items_per_section,
-            replay_buffer: config.replay_buffer,
-            write_buffer: config.write_buffer,
-            freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+            partition_prefix: format!("{}-cache", partition_prefix.clone()),
+            prunable_items_per_section,
+            replay_buffer,
+            write_buffer,
+            freezer_journal_buffer_pool: freezer_journal_buffer_pool.clone(),
         };
-        let cache = cache::Manager::init(
+        let cache = cache::Manager::<_, _, V, G>::init(
             context.with_label("cache"),
             prunable_config,
-            config.codec_config.clone(),
+            codec_config.clone(),
         )
         .await;
 
@@ -127,30 +179,27 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             immutable::Config {
                 metadata_partition: format!(
                     "{}-finalizations-by-height-metadata",
-                    config.partition_prefix
+                    partition_prefix
                 ),
                 freezer_table_partition: format!(
                     "{}-finalizations-by-height-freezer-table",
-                    config.partition_prefix
+                    partition_prefix
                 ),
-                freezer_table_initial_size: config.freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
+                freezer_table_initial_size,
+                freezer_table_resize_frequency,
+                freezer_table_resize_chunk_size,
                 freezer_journal_partition: format!(
                     "{}-finalizations-by-height-freezer-journal",
-                    config.partition_prefix
+                    partition_prefix
                 ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
-                ordinal_partition: format!(
-                    "{}-finalizations-by-height-ordinal",
-                    config.partition_prefix
-                ),
-                items_per_section: config.immutable_items_per_section,
+                freezer_journal_target_size,
+                freezer_journal_compression,
+                freezer_journal_buffer_pool: freezer_journal_buffer_pool.clone(),
+                ordinal_partition: format!("{}-finalizations-by-height-ordinal", partition_prefix),
+                items_per_section: immutable_items_per_section,
                 codec_config: (),
-                replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
+                replay_buffer,
+                write_buffer,
             },
         )
         .await
@@ -162,29 +211,26 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let finalized_blocks = immutable::Archive::init(
             context.with_label("finalized_blocks"),
             immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalized_blocks-metadata",
-                    config.partition_prefix
-                ),
+                metadata_partition: format!("{}-finalized_blocks-metadata", partition_prefix),
                 freezer_table_partition: format!(
                     "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
+                    partition_prefix
                 ),
-                freezer_table_initial_size: config.freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
+                freezer_table_initial_size,
+                freezer_table_resize_frequency,
+                freezer_table_resize_chunk_size,
                 freezer_journal_partition: format!(
                     "{}-finalized_blocks-freezer-journal",
-                    config.partition_prefix
+                    partition_prefix
                 ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
-                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
-                items_per_section: config.immutable_items_per_section,
-                codec_config: config.codec_config.clone(),
-                replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
+                freezer_journal_target_size,
+                freezer_journal_compression,
+                freezer_journal_buffer_pool,
+                ordinal_partition: format!("{}-finalized_blocks-ordinal", partition_prefix),
+                items_per_section: immutable_items_per_section,
+                codec_config: codec_config.clone(),
+                replay_buffer,
+                write_buffer,
             },
         )
         .await
@@ -206,18 +252,18 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         );
 
         // Initialize mailbox
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = mpsc::channel(mailbox_size);
         (
             Self {
                 context,
                 mailbox,
-                identity: config.identity,
-                mailbox_size: config.mailbox_size,
-                namespace: config.namespace,
-                view_retention_timeout: config.view_retention_timeout,
-                max_repair: config.max_repair,
-                codec_config: config.codec_config,
-                partition_prefix: config.partition_prefix,
+                identity,
+                mailbox_size,
+                namespace,
+                view_retention_timeout,
+                max_repair,
+                codec_config,
+                partition_prefix,
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
                 cache,
@@ -225,6 +271,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                 finalized_blocks,
                 finalized_height,
                 processed_height,
+                signing,
             },
             Mailbox::new(sender),
         )
@@ -579,7 +626,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 },
                                 Request::Finalized { height } => {
                                     // Parse finalization
-                                    let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((finalization, block)) = <(SigningFinalization<G, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -587,7 +634,16 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&self.namespace, &self.identity)
+                                        || self
+                                            .signing
+                                            .verify_certificate::<B::Commitment>(
+                                                VoteContext::Finalize {
+                                                    namespace: &self.namespace,
+                                                    proposal: &finalization.proposal,
+                                                },
+                                                &finalization.certificate,
+                                            )
+                                            .is_err()
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -600,15 +656,24 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 },
                                 Request::Notarized { round } => {
                                     // Parse notarization
-                                    let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((notarization, block)) = <(SigningNotarization<G, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
 
                                     // Validation
-                                    if notarization.round() != round
+                                    if notarization.proposal.round != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&self.namespace, &self.identity)
+                                        || self
+                                            .signing
+                                            .verify_certificate::<B::Commitment>(
+                                                VoteContext::Notarize {
+                                                    namespace: &self.namespace,
+                                                    proposal: &notarization.proposal,
+                                                },
+                                                &notarization.certificate,
+                                            )
+                                            .is_err()
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -626,13 +691,24 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     // resolve the request for the notarization before we resolve
                                     // the request for the block.
                                     let height = block.height();
-                                    if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
-                                        self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx).await;
+                                    if let Some(finalization) =
+                                        self.cache.get_finalization_for(commitment).await
+                                    {
+                                        self.finalize(
+                                            height,
+                                            commitment,
+                                            block.clone(),
+                                            Some(finalization),
+                                            &mut notifier_tx,
+                                        )
+                                        .await;
                                     }
 
                                     // Cache the notarization and block
                                     self.cache_block(round, commitment, block).await;
-                                    self.cache.put_notarization(round, commitment, notarization).await;
+                                    self.cache
+                                        .put_notarization(round, commitment, notarization)
+                                        .await;
                                 },
                             }
                         },
@@ -681,7 +757,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     async fn get_finalization_by_height(
         &self,
         height: u64,
-    ) -> Option<Finalization<V, B::Commitment>> {
+    ) -> Option<SigningFinalization<G, B::Commitment>> {
         match self
             .finalizations_by_height
             .get(ArchiveID::Index(height))
@@ -701,7 +777,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         height: u64,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<V, B::Commitment>>,
+        finalization: Option<SigningFinalization<G, B::Commitment>>,
         notifier: &mut mpsc::Sender<()>,
     ) {
         self.notify_subscribers(commitment, &block).await;

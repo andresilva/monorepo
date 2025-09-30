@@ -7,6 +7,7 @@ use crate::{
     threshold_simplex::signing::SigningScheme, types::View, Automaton, Relay, Reporter,
     ThresholdSupervisor,
 };
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Signer,
@@ -27,7 +28,7 @@ pub struct Engine<
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<V, D>>,
+    F: Reporter,
     S: ThresholdSupervisor<
         Index = View,
         PublicKey = C::PublicKey,
@@ -36,8 +37,16 @@ pub struct Engine<
         Polynomial = Vec<V::Public>,
         Share = group::Share,
     >,
-    G: SigningScheme,
-> {
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    F: Reporter<Activity = Activity<V, D, G>>,
+    G::Randomness: Clone + PartialEq,
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+{
     context: E,
 
     voter: voter::Actor<E, C, B, V, D, A, R, F, S, G>,
@@ -58,7 +67,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<V, D>>,
+        F: Reporter,
         S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
@@ -67,8 +76,16 @@ impl<
             Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
-        G: SigningScheme,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
     > Engine<E, C, B, V, D, A, R, F, S, G>
+where
+    F: Reporter<Activity = Activity<V, D, G>>,
+    G::Randomness: Clone + PartialEq,
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
 {
     /// Create a new `threshold-simplex` consensus engine.
     pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S, G>) -> Self {

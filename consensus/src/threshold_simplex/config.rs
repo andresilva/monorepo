@@ -4,6 +4,7 @@ use crate::{
     types::{Epoch, View},
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Signer,
@@ -21,7 +22,7 @@ pub struct Config<
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay,
-    F: Reporter<Activity = Activity<V, D>>,
+    F: Reporter,
     S: ThresholdSupervisor<
         Index = View,
         Identity = V::Public,
@@ -29,8 +30,16 @@ pub struct Config<
         PublicKey = C::PublicKey,
         Share = group::Share,
     >,
-    G: SigningScheme,
-> {
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    F: Reporter<Activity = Activity<V, D, G>>,
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+    G::Randomness: Clone + PartialEq,
+{
     /// Cryptographic primitives.
     pub crypto: C,
 
@@ -121,7 +130,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<D>>,
         R: Relay,
-        F: Reporter<Activity = Activity<V, D>>,
+        F: Reporter,
         S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
@@ -129,8 +138,16 @@ impl<
             Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
-        G: SigningScheme,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
     > Config<C, B, V, D, A, R, F, S, G>
+where
+    F: Reporter<Activity = Activity<V, D, G>>,
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+    G::Randomness: Clone + PartialEq,
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

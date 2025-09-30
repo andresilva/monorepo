@@ -31,22 +31,28 @@ struct Round<
     B: Blocker<PublicKey = C>,
     V: Variant,
     D: Digest,
-    R: Reporter<Activity = Activity<V, D>>,
+    R: Reporter,
     S: ThresholdSupervisor<
         Index = View,
         Polynomial = Vec<V::Public>,
         PublicKey = C,
         Identity = V::Public,
     >,
-    G: SigningScheme,
-> {
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    R: Reporter<Activity = Activity<V, D, G>>,
+{
     view: View,
 
     blocker: B,
     reporter: R,
     supervisor: S,
     signing: G,
-    verifier: BatchVerifier<V, D>,
+    verifier: BatchVerifier<V, D, G>,
     notarizes: Vec<Option<Notarize<V, D>>>,
     nullifies: Vec<Option<Nullify<V>>>,
     finalizes: Vec<Option<Finalize<V, D>>>,
@@ -61,15 +67,21 @@ impl<
         B: Blocker<PublicKey = C>,
         V: Variant,
         D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
+        R: Reporter,
         S: ThresholdSupervisor<
             Index = View,
             Polynomial = Vec<V::Public>,
             PublicKey = C,
             Identity = V::Public,
         >,
-        G: SigningScheme,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
     > Round<C, B, V, D, R, S, G>
+where
+    R: Reporter<Activity = Activity<V, D, G>>,
 {
     fn new(
         blocker: B,
@@ -89,6 +101,7 @@ impl<
         };
 
         // Initialize data structures
+        let signing_clone = signing.clone();
         Self {
             view,
 
@@ -96,7 +109,7 @@ impl<
             reporter,
             supervisor,
             signing,
-            verifier: BatchVerifier::new(quorum),
+            verifier: BatchVerifier::new(quorum, Some(signing_clone)),
 
             notarizes: vec![None; participants],
             nullifies: vec![None; participants],
@@ -328,7 +341,7 @@ pub struct Actor<
     B: Blocker<PublicKey = C>,
     V: Variant,
     D: Digest,
-    R: Reporter<Activity = Activity<V, D>>,
+    R: Reporter,
     S: ThresholdSupervisor<
         Index = View,
         PublicKey = C,
@@ -336,7 +349,9 @@ pub struct Actor<
         Polynomial = Vec<V::Public>,
     >,
     G: SigningScheme,
-> {
+> where
+    R: Reporter<Activity = Activity<V, D, G>>,
+{
     context: E,
     blocker: B,
     reporter: R,
@@ -365,15 +380,21 @@ impl<
         B: Blocker<PublicKey = C>,
         V: Variant,
         D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
+        R: Reporter,
         S: ThresholdSupervisor<
             Index = View,
             PublicKey = C,
             Identity = V::Public,
             Polynomial = Vec<V::Public>,
         >,
-        G: SigningScheme,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
     > Actor<E, C, B, V, D, R, S, G>
+where
+    R: Reporter<Activity = Activity<V, D, G>>,
 {
     pub fn new(context: E, cfg: Config<B, R, S, G>) -> (Self, Mailbox<C, V, D>) {
         let added = Counter::default();

@@ -9,7 +9,17 @@ use crate::types::{
     outbound::Outbound,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{threshold_simplex::types::Activity, Viewable};
+use commonware_consensus::{
+    threshold_simplex::{
+        signing::BlsThresholdScheme,
+        types::{
+            Activity,
+            Finalization as LegacyFinalization,
+            Notarization as LegacyNotarization,
+        },
+    },
+    Viewable,
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         poly,
@@ -190,9 +200,15 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let view = activity.view();
                     match activity {
                         Activity::Notarization(notarization) => {
+                            let notarization = LegacyNotarization::from_signing::<
+                                BlsThresholdScheme<MinSig>,
+                            >(notarization);
                             info!(view, payload = ?notarization.proposal.payload, signature=?notarization.proposal_signature, seed=?notarization.seed_signature, "notarized");
                         }
                         Activity::Finalization(finalization) => {
+                            let finalization = LegacyFinalization::from_signing::<
+                                BlsThresholdScheme<MinSig>,
+                            >(finalization);
                             info!(view, payload = ?finalization.proposal.payload, signature=?finalization.proposal_signature, seed=?finalization.seed_signature, "finalized");
 
                             // Post finalization

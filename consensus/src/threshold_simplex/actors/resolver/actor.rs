@@ -5,12 +5,13 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        signing::SigningScheme,
-        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
+        signing::{self, SigningScheme},
+        types::{Backfiller, Notarization, Nullification, Request, Voter},
     },
     types::{Epoch, View},
-    Epochable, ThresholdSupervisor, Viewable,
+    ThresholdSupervisor, Viewable,
 };
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
@@ -111,8 +112,15 @@ pub struct Actor<
         Identity = V::Public,
         Polynomial = Vec<V::Public>,
     >,
-    G: SigningScheme,
-> {
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    G::Randomness: Clone + PartialEq,
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+{
     context: E,
     blocker: B,
     supervisor: S,
@@ -153,8 +161,15 @@ impl<
             Identity = V::Public,
             Polynomial = Vec<V::Public>,
         >,
-        G: SigningScheme,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
     > Actor<E, C, B, V, D, S, G>
+where
+    G::Randomness: Clone + PartialEq,
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
 {
     pub fn new(context: E, cfg: Config<C, B, S, G>) -> (Self, Mailbox<V, D>) {
         // Initialize requester
@@ -221,7 +236,7 @@ impl<
     async fn send<Sr: Sender<PublicKey = C>>(
         &mut self,
         shuffle: bool,
-        sender: &mut WrappedSender<Sr, Backfiller<V, D>>,
+        sender: &mut WrappedSender<Sr, Backfiller<G, D>>,
     ) {
         // Clear retry
         self.retry = None;
@@ -286,7 +301,7 @@ impl<
 
                 // Create new message
                 msg.id = request;
-                let encoded = Backfiller::<V, D>::Request(msg.clone());
+                let encoded = Backfiller::<G, D>::Request(msg.clone());
 
                 // Try to send
                 if sender
@@ -336,7 +351,6 @@ impl<
         // Wait for an event
         let mut current_view = 0;
         let mut finalized_view = 0;
-        let identity = *self.supervisor.identity();
         loop {
             // Record outstanding metric
             self.unfulfilled.set(self.required.len() as i64);
@@ -507,7 +521,17 @@ impl<
 
                             // Send response
                             debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
-                            let response = Response::new(request.id, notarizations_found, nullifications_found);
+                            let response = signing::Response::new(
+                                request.id,
+                                notarizations_found
+                                    .into_iter()
+                                    .map(|notarization| notarization.into_signing::<G>())
+                                    .collect(),
+                                nullifications_found
+                                    .into_iter()
+                                    .map(|nullification| nullification.into_signing::<G>())
+                                    .collect(),
+                            );
                             let response = Backfiller::Response(response);
                             sender
                                 .send(Recipients::One(s), response, false)
@@ -523,15 +547,25 @@ impl<
                             self.inflight.clear(request.id);
 
                             // Verify message
-                            if !response.verify(&self.namespace, &identity) {
-                                warn!(sender = ?s, "blocking peer");
+                            if let Err(error) =
+                                response.verify(&self.signing, &self.namespace)
+                            {
+                                warn!(sender = ?s, ?error, "blocking peer");
                                 self.requester.block(s.clone());
                                 self.blocker.block(s).await;
                                 continue;
                             }
 
                             // Validate that all notarizations and nullifications are from the current epoch
-                            if response.notarizations.iter().any(|n| n.epoch() != self.epoch) || response.nullifications.iter().any(|n| n.epoch() != self.epoch) {
+                            if response
+                                .notarizations
+                                .iter()
+                                .any(|n| n.epoch() != self.epoch)
+                                || response
+                                    .nullifications
+                                    .iter()
+                                    .any(|n| n.epoch() != self.epoch)
+                            {
                                 warn!(sender = ?s, "blocking peer for epoch mismatch");
                                 self.requester.block(s.clone());
                                 self.blocker.block(s).await;
@@ -548,8 +582,9 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                self.notarizations.insert(view, notarization.clone());
-                                voters.push(Voter::Notarization(notarization));
+                                let legacy = Notarization::from_signing::<G>(notarization);
+                                self.notarizations.insert(view, legacy.clone());
+                                voters.push(Voter::Notarization(legacy));
                                 notarizations_found.insert(view);
                             }
                             let mut nullifications_found = BTreeSet::new();
@@ -560,8 +595,9 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                self.nullifications.insert(view, nullification.clone());
-                                voters.push(Voter::Nullification(nullification));
+                                let legacy = Nullification::from_signing::<G>(nullification);
+                                self.nullifications.insert(view, legacy.clone());
+                                voters.push(Voter::Nullification(legacy));
                                 nullifications_found.insert(view);
                             }
 

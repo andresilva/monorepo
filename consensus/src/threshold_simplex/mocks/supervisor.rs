@@ -2,9 +2,13 @@
 //! verifies activities, records votes/faults, and exposes a simple subscription.
 
 use crate::{
-    threshold_simplex::types::{
-        Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
-        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable,
+    threshold_simplex::{
+        signing::SigningScheme,
+        types::{
+            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed,
+            Seedable,
+        },
     },
     types::View,
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu, Viewable,
@@ -38,10 +42,20 @@ pub struct Config<P: PublicKey, V: Variant> {
 }
 
 type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
-type Faults<P, V, D> = HashMap<P, HashMap<View, HashSet<Activity<V, D>>>>;
+type Faults<P, V, D, G> = HashMap<P, HashMap<View, Vec<Activity<V, D, G>>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<P: PublicKey, V: Variant, D: Digest> {
+pub struct Supervisor<P, V, D, G>
+where
+    P: PublicKey,
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
     identity: V::Public,
     participants: BTreeMap<View, ViewInfo<P, V::Public>>,
 
@@ -55,14 +69,24 @@ pub struct Supervisor<P: PublicKey, V: Variant, D: Digest> {
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<V>>>>,
     pub finalizes: Arc<Mutex<Participation<P, D>>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<V, D>>>>,
-    pub faults: Arc<Mutex<Faults<P, V, D>>>,
+    pub faults: Arc<Mutex<Faults<P, V, D, G>>>,
     pub invalid: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
+impl<P, V, D, G> Supervisor<P, V, D, G>
+where
+    P: PublicKey,
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
     pub fn new(cfg: Config<P, V>) -> Self {
         let mut identity = None;
         let mut parsed_participants = BTreeMap::new();
@@ -98,7 +122,17 @@ impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
+impl<P, V, D, G> Su for Supervisor<P, V, D, G>
+where
+    P: PublicKey,
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
     type Index = View;
     type PublicKey = P;
 
@@ -127,7 +161,17 @@ impl<P: PublicKey, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
+impl<P, V, D, G> TSu for Supervisor<P, V, D, G>
+where
+    P: PublicKey,
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
     type Seed = V::Signature;
     type Identity = V::Public;
     type Polynomial = Vec<V::Public>;
@@ -176,8 +220,18 @@ impl<P: PublicKey, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
-    type Activity = Activity<V, D>;
+impl<P, V, D, G> Reporter for Supervisor<P, V, D, G>
+where
+    P: PublicKey,
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
+    type Activity = Activity<V, D, G>;
 
     async fn report(&mut self, activity: Self::Activity) {
         // We check signatures for all messages to ensure that the prover is working correctly
@@ -211,6 +265,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(public_key);
             }
             Activity::Notarization(notarization) => {
+                let notarization = Notarization::from_signing::<G>(notarization);
                 // Verify notarization
                 let view = notarization.view();
                 let seed = notarization.seed();
@@ -260,6 +315,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(public_key);
             }
             Activity::Nullification(nullification) => {
+                let nullification = Nullification::from_signing::<G>(nullification);
                 // Verify nullification
                 let view = nullification.view();
                 let seed = nullification.seed();
@@ -310,7 +366,8 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .or_default()
                     .insert(public_key);
             }
-            Activity::Finalization(ref finalization) => {
+            Activity::Finalization(finalization) => {
+                let finalization = Finalization::from_signing::<G>(finalization);
                 // Verify finalization
                 let view = finalization.view();
                 let seed = finalization.seed();
@@ -366,7 +423,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .or_default()
                     .entry(view)
                     .or_default()
-                    .insert(activity);
+                    .push(activity);
             }
             Activity::ConflictingFinalize(ref conflicting) => {
                 let view = conflicting.view();
@@ -391,7 +448,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .or_default()
                     .entry(view)
                     .or_default()
-                    .insert(activity);
+                    .push(activity);
             }
             Activity::NullifyFinalize(ref nullify_finalize) => {
                 let view = nullify_finalize.view();
@@ -416,13 +473,23 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .or_default()
                     .entry(view)
                     .or_default()
-                    .insert(activity);
+                    .push(activity);
             }
         }
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Monitor for Supervisor<P, V, D> {
+impl<P, V, D, G> Monitor for Supervisor<P, V, D, G>
+where
+    P: PublicKey,
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
     type Index = View;
     async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
         let (tx, rx) = futures::channel::mpsc::channel(128);

@@ -1,9 +1,11 @@
 use crate::{
-    threshold_simplex::types::{Finalization, Notarization},
+    threshold_simplex::signing::{
+        Finalization as SigningFinalization, Notarization as SigningNotarization, SigningScheme,
+    },
     types::{Epoch, Round, View},
     Block,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, EncodeSize, Read, Write};
 use commonware_cryptography::bls12381::primitives::variant::Variant;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
@@ -17,6 +19,7 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::BTreeMap,
+    marker::PhantomData,
     num::{NonZero, NonZeroUsize},
     time::Instant,
 };
@@ -35,18 +38,45 @@ pub(crate) struct Config {
 }
 
 /// Prunable archives for a single epoch.
-struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> {
+struct Cache<
+    R: Rng + Spawner + Metrics + Clock + GClock + Storage,
+    B: Block,
+    V: Variant,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+{
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
     notarized_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarizations stored by view
-    notarizations: prunable::Archive<TwoCap, R, B::Commitment, Notarization<V, B::Commitment>>,
+    notarizations:
+        prunable::Archive<TwoCap, R, B::Commitment, SigningNotarization<G, B::Commitment>>,
     /// Finalizations stored by view
-    finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations:
+        prunable::Archive<TwoCap, R, B::Commitment, SigningFinalization<G, B::Commitment>>,
+    /// Marker to bind the variant type parameter.
+    marker: PhantomData<V>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> Cache<R, B, V> {
+impl<
+        R: Rng + Spawner + Metrics + Clock + GClock + Storage,
+        B: Block,
+        V: Variant,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    > Cache<R, B, V, G>
+where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+{
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
         match futures::try_join!(
@@ -66,7 +96,14 @@ pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     V: Variant,
-> {
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+{
     /// Context
     context: R,
 
@@ -81,10 +118,24 @@ pub(crate) struct Manager<
     metadata: Metadata<R, FixedBytes<1>, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
-    caches: BTreeMap<Epoch, Cache<R, B, V>>,
+    caches: BTreeMap<Epoch, Cache<R, B, V, G>>,
+    /// Marker to bind the variant type parameter.
+    marker: PhantomData<V>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> Manager<R, B, V> {
+impl<
+        R: Rng + Spawner + Metrics + Clock + GClock + Storage,
+        B: Block,
+        V: Variant,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    > Manager<R, B, V, G>
+where
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+{
     /// Initialize the cache manager and its metadata store.
     pub(crate) async fn init(context: R, cfg: Config, codec_config: B::Cfg) -> Self {
         // Initialize metadata
@@ -105,6 +156,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             codec_config,
             metadata,
             caches: BTreeMap::new(),
+            marker: PhantomData,
         };
         let (floor, ceiling) = cache.get_metadata();
         for epoch in floor..=ceiling {
@@ -134,7 +186,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     ///
     /// If the epoch is less than the minimum cached epoch, then it has already been pruned,
     /// and this will return `None`.
-    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, V>> {
+    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, V, G>> {
         // If the cache exists, return it
         if self.caches.contains_key(&epoch) {
             return self.caches.get_mut(&epoch);
@@ -173,6 +225,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
                 notarized_blocks,
                 notarizations,
                 finalizations,
+                marker: PhantomData,
             },
         );
         assert!(existing.is_none(), "cache already exists for epoch {epoch}");
@@ -232,7 +285,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         &mut self,
         round: Round,
         commitment: B::Commitment,
-        notarization: Notarization<V, B::Commitment>,
+        notarization: SigningNotarization<G, B::Commitment>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -249,7 +302,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         &mut self,
         round: Round,
         commitment: B::Commitment,
-        finalization: Finalization<V, B::Commitment>,
+        finalization: SigningFinalization<G, B::Commitment>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -280,7 +333,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     pub(crate) async fn get_notarization(
         &self,
         round: Round,
-    ) -> Option<Notarization<V, B::Commitment>> {
+    ) -> Option<SigningNotarization<G, B::Commitment>> {
         let cache = self.caches.get(&round.epoch())?;
         cache
             .notarizations
@@ -293,7 +346,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     pub(crate) async fn get_finalization_for(
         &self,
         commitment: B::Commitment,
-    ) -> Option<Finalization<V, B::Commitment>> {
+    ) -> Option<SigningFinalization<G, B::Commitment>> {
         for cache in self.caches.values().rev() {
             match cache.finalizations.get(Identifier::Key(&commitment)).await {
                 Ok(Some(finalization)) => return Some(finalization),
@@ -342,11 +395,12 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             .filter(|epoch| *epoch < new_floor)
             .collect();
         for epoch in old_epochs.iter() {
-            let Cache::<R, B, V> {
+            let Cache::<R, B, V, G> {
                 verified_blocks: vb,
                 notarized_blocks: nb,
                 notarizations: nv,
                 finalizations: fv,
+                ..
             } = self.caches.remove(epoch).unwrap();
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");

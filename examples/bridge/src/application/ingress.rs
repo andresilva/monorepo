@@ -1,5 +1,8 @@
 use commonware_consensus::{
-    threshold_simplex::types::{Activity, Context},
+    threshold_simplex::{
+        signing::BlsThresholdScheme,
+        types::{Activity, Context},
+    },
     types::{Epoch, Round},
     Automaton as Au, Epochable, Relay as Re, Reporter,
 };
@@ -24,7 +27,7 @@ pub enum Message<D: Digest> {
         response: oneshot::Sender<bool>,
     },
     Report {
-        activity: Activity<MinSig, D>,
+        activity: Activity<MinSig, D, BlsThresholdScheme<MinSig>>,
     },
 }
 
@@ -95,7 +98,7 @@ impl<D: Digest> Re for Mailbox<D> {
 }
 
 impl<D: Digest> Reporter for Mailbox<D> {
-    type Activity = Activity<MinSig, D>;
+    type Activity = Activity<MinSig, D, BlsThresholdScheme<MinSig>>;
 
     async fn report(&mut self, activity: Self::Activity) {
         self.sender

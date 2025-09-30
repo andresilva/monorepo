@@ -4,10 +4,13 @@ use crate::{
     threshold_simplex::types::{
         finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Proposal,
     },
-    types::Round,
+    types::{Epoch, Round, View},
+    Viewable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
@@ -21,7 +24,11 @@ use commonware_cryptography::{
     },
     Digest,
 };
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    fmt::Debug,
+    hash::Hash,
+};
 use thiserror::Error;
 
 /// Errors emitted by signing scheme implementations.
@@ -39,6 +46,9 @@ pub enum Error {
     /// Threshold recovery failure.
     #[error("threshold error: {0}")]
     Threshold(#[from] ThresholdError),
+    /// Randomness derived from certificates disagrees across entries.
+    #[error("randomness mismatch for view {view}")]
+    RandomnessMismatch { view: View },
 }
 
 /// Identifies the context in which a vote or certificate is produced.
@@ -296,7 +306,7 @@ where
 }
 
 /// Aggregated notarization certificate with randomness seed.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
@@ -335,7 +345,8 @@ where
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate =
+            S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
         Ok(Self {
             proposal,
@@ -344,8 +355,26 @@ where
     }
 }
 
+impl<S, D> Notarization<S, D>
+where
+    S: SigningScheme,
+    D: Digest,
+{
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal.view()
+    }
+
+    pub fn epoch(&self) -> Epoch {
+        self.proposal.round.epoch()
+    }
+}
+
 /// Aggregated nullification certificate for a round.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullification<S: SigningScheme> {
     pub round: Round,
     pub certificate: S::Certificate,
@@ -381,14 +410,176 @@ where
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let round = Round::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate =
+            S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
         Ok(Self { round, certificate })
     }
 }
 
-/// Aggregated finalization certificate.
+impl<S> Nullification<S>
+where
+    S: SigningScheme,
+{
+    pub fn round(&self) -> Round {
+        self.round
+    }
+
+    pub fn view(&self) -> View {
+        self.round.view()
+    }
+
+    pub fn epoch(&self) -> Epoch {
+        self.round.epoch()
+    }
+}
+
+/// Backfill response carrying notarizations and nullifications.
 #[derive(Clone)]
+pub struct Response<S: SigningScheme, D: Digest> {
+    pub id: u64,
+    pub notarizations: Vec<Notarization<S, D>>,
+    pub nullifications: Vec<Nullification<S>>,
+}
+
+impl<S, D> Response<S, D>
+where
+    S: SigningScheme,
+    D: Digest,
+{
+    pub fn new(
+        id: u64,
+        notarizations: Vec<Notarization<S, D>>,
+        nullifications: Vec<Nullification<S>>,
+    ) -> Self {
+        Self {
+            id,
+            notarizations,
+            nullifications,
+        }
+    }
+
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> Result<(), Error>
+    where
+        S::Randomness: Clone + PartialEq,
+    {
+        let mut seeds: HashMap<View, S::Randomness> = HashMap::new();
+
+        for notarization in &self.notarizations {
+            let randomness = scheme.verify_certificate::<D>(
+                VoteContext::Notarize {
+                    namespace,
+                    proposal: &notarization.proposal,
+                },
+                &notarization.certificate,
+            )?;
+
+            if let Some(randomness) = randomness {
+                let view = notarization.proposal.view();
+                if let Some(previous) = seeds.get(&view) {
+                    if previous != &randomness {
+                        return Err(Error::RandomnessMismatch { view });
+                    }
+                } else {
+                    seeds.insert(view, randomness);
+                }
+            }
+        }
+
+        for nullification in &self.nullifications {
+            let randomness = scheme.verify_certificate::<D>(
+                VoteContext::Nullify {
+                    namespace,
+                    round: nullification.round,
+                },
+                &nullification.certificate,
+            )?;
+
+            if let Some(randomness) = randomness {
+                let view = nullification.round.view();
+                if let Some(previous) = seeds.get(&view) {
+                    if previous != &randomness {
+                        return Err(Error::RandomnessMismatch { view });
+                    }
+                } else {
+                    seeds.insert(view, randomness);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl<S, D> Write for Response<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: Write,
+    D: Digest,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        UInt(self.id).write(writer);
+        self.notarizations.write(writer);
+        self.nullifications.write(writer);
+    }
+}
+
+impl<S, D> EncodeSize for Response<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: EncodeSize,
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        UInt(self.id).encode_size()
+            + self.notarizations.encode_size()
+            + self.nullifications.encode_size()
+    }
+}
+
+impl<S, D> Read for Response<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: Read<Cfg = S::CertificateReadCfg>,
+    D: Digest,
+{
+    type Cfg = usize;
+
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, CodecError> {
+        let id = UInt::read(reader)?.into();
+        let mut views = HashSet::new();
+        let notarizations = Vec::<Notarization<S, D>>::read_range(reader, ..=*max_len)?;
+        for notarization in &notarizations {
+            if !views.insert(notarization.proposal.view()) {
+                return Err(CodecError::Invalid(
+                    "consensus::threshold_simplex::signing::Response",
+                    "duplicate notarization view",
+                ));
+            }
+        }
+
+        let remaining = max_len.saturating_sub(notarizations.len());
+        views.clear();
+        let nullifications = Vec::<Nullification<S>>::read_range(reader, ..=remaining)?;
+        for nullification in &nullifications {
+            if !views.insert(nullification.round.view()) {
+                return Err(CodecError::Invalid(
+                    "consensus::threshold_simplex::signing::Response",
+                    "duplicate nullification view",
+                ));
+            }
+        }
+
+        Ok(Self {
+            id,
+            notarizations,
+            nullifications,
+        })
+    }
+}
+
+/// Aggregated finalization certificate.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finalization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
@@ -427,7 +618,8 @@ where
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate =
+            S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
         Ok(Self {
             proposal,
@@ -436,11 +628,29 @@ where
     }
 }
 
+impl<S, D> Finalization<S, D>
+where
+    S: SigningScheme,
+    D: Digest,
+{
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal.view()
+    }
+
+    pub fn epoch(&self) -> Epoch {
+        self.proposal.round.epoch()
+    }
+}
+
 /// Trait that signing schemes must implement.
 pub trait SigningScheme: Clone + Send + Sync + 'static {
     type SignerId: Clone + Ord;
     type Signature: Clone;
-    type Certificate: Clone;
+    type Certificate: Clone + Debug + PartialEq + Eq + Hash;
     type Randomness;
 
     type SignatureReadCfg;
@@ -1551,5 +1761,249 @@ mod tests {
             )
             .expect_err("expected invalid certificate");
         assert!(matches!(err, Error::Threshold(_)));
+    }
+
+    #[test]
+    fn response_verify_succeeds() {
+        let threshold = 3;
+        let (schemes, _shares) = build_scheme_set(41, 4, threshold);
+        let namespace = b"response-verify";
+
+        let round = Round::new(0, 30);
+        let payload = Sha256Digest::from([11u8; 32]);
+        let proposal = Proposal::new(round, 29, payload);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(threshold)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        VoteContext::Notarize {
+                            namespace,
+                            proposal: &proposal,
+                        },
+                        scheme.share.index,
+                    )
+                    .expect("sign vote")
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(
+                VoteContext::Notarize {
+                    namespace,
+                    proposal: &proposal,
+                },
+                &votes,
+            )
+            .expect("assemble");
+        let notarization: Notarization<BlsThresholdScheme<MinSig>, Sha256Digest> = Notarization {
+            proposal: proposal.clone(),
+            certificate,
+        };
+
+        let null_votes: Vec<_> = schemes
+            .iter()
+            .take(threshold)
+            .map(|scheme| {
+                scheme
+                    .sign_vote::<Sha256Digest>(
+                        VoteContext::Nullify { namespace, round },
+                        scheme.share.index,
+                    )
+                    .expect("sign vote")
+            })
+            .collect();
+
+        let null_certificate = schemes[0]
+            .assemble_certificate::<Sha256Digest>(
+                VoteContext::Nullify { namespace, round },
+                &null_votes,
+            )
+            .expect("assemble");
+        let nullification: Nullification<BlsThresholdScheme<MinSig>> = Nullification {
+            round,
+            certificate: null_certificate,
+        };
+
+        let response: Response<BlsThresholdScheme<MinSig>, Sha256Digest> =
+            Response::new(7, vec![notarization], vec![nullification]);
+
+        response.verify(&schemes[0], namespace).expect("verify");
+    }
+
+    #[test]
+    fn response_verify_rejects_invalid_certificate() {
+        let threshold = 3;
+        let (schemes, _shares) = build_scheme_set(43, 4, threshold);
+        let namespace = b"response-verify-invalid";
+
+        let round = Round::new(0, 31);
+        let payload = Sha256Digest::from([12u8; 32]);
+        let proposal = Proposal::new(round, 30, payload);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(threshold)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        VoteContext::Notarize {
+                            namespace,
+                            proposal: &proposal,
+                        },
+                        scheme.share.index,
+                    )
+                    .expect("sign vote")
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(
+                VoteContext::Notarize {
+                    namespace,
+                    proposal: &proposal,
+                },
+                &votes,
+            )
+            .expect("assemble");
+        let notarization: Notarization<BlsThresholdScheme<MinSig>, Sha256Digest> = Notarization {
+            proposal: proposal.clone(),
+            certificate,
+        };
+
+        let null_votes: Vec<_> = schemes
+            .iter()
+            .take(threshold)
+            .map(|scheme| {
+                scheme
+                    .sign_vote::<Sha256Digest>(
+                        VoteContext::Nullify { namespace, round },
+                        scheme.share.index,
+                    )
+                    .expect("sign vote")
+            })
+            .collect();
+
+        let null_certificate = schemes[0]
+            .assemble_certificate::<Sha256Digest>(
+                VoteContext::Nullify { namespace, round },
+                &null_votes,
+            )
+            .expect("assemble");
+        let nullification: Nullification<BlsThresholdScheme<MinSig>> = Nullification {
+            round,
+            certificate: null_certificate,
+        };
+
+        let mut response: Response<BlsThresholdScheme<MinSig>, Sha256Digest> =
+            Response::new(9, vec![notarization], vec![nullification]);
+
+        // Corrupt the notarization certificate
+        let mut bad_signature = response.notarizations[0].certificate.0.clone();
+        bad_signature.add(&<MinSig as Variant>::Signature::one());
+        response.notarizations[0].certificate.0 = bad_signature;
+
+        let err = response
+            .verify(&schemes[0], namespace)
+            .expect_err("invalid certificate should fail");
+        assert!(matches!(err, Error::Threshold(_)));
+    }
+
+    #[test]
+    fn response_codec_roundtrip() {
+        let threshold = 3;
+        let (schemes, _shares) = build_scheme_set(45, 4, threshold);
+        let namespace = b"response-codec";
+
+        let round = Round::new(0, 32);
+        let payload = Sha256Digest::from([13u8; 32]);
+        let proposal = Proposal::new(round, 31, payload);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(threshold)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        VoteContext::Notarize {
+                            namespace,
+                            proposal: &proposal,
+                        },
+                        scheme.share.index,
+                    )
+                    .expect("sign vote")
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(
+                VoteContext::Notarize {
+                    namespace,
+                    proposal: &proposal,
+                },
+                &votes,
+            )
+            .expect("assemble");
+        let notarization: Notarization<BlsThresholdScheme<MinSig>, Sha256Digest> = Notarization {
+            proposal: proposal.clone(),
+            certificate,
+        };
+
+        let null_votes: Vec<_> = schemes
+            .iter()
+            .take(threshold)
+            .map(|scheme| {
+                scheme
+                    .sign_vote::<Sha256Digest>(
+                        VoteContext::Nullify { namespace, round },
+                        scheme.share.index,
+                    )
+                    .expect("sign vote")
+            })
+            .collect();
+
+        let null_certificate = schemes[0]
+            .assemble_certificate::<Sha256Digest>(
+                VoteContext::Nullify { namespace, round },
+                &null_votes,
+            )
+            .expect("assemble");
+        let nullification: Nullification<BlsThresholdScheme<MinSig>> = Nullification {
+            round,
+            certificate: null_certificate,
+        };
+
+        let message: Response<BlsThresholdScheme<MinSig>, Sha256Digest> =
+            Response::new(11, vec![notarization], vec![nullification]);
+
+        let encoded = message.encode();
+        let mut buf = &encoded[..];
+        let decoded = Response::<BlsThresholdScheme<MinSig>, Sha256Digest>::read_cfg(&mut buf, &8)
+            .expect("decode");
+        assert_eq!(decoded.id, message.id);
+        assert_eq!(decoded.notarizations.len(), message.notarizations.len());
+        assert_eq!(decoded.nullifications.len(), message.nullifications.len());
+
+        for (decoded_not, expected_not) in decoded
+            .notarizations
+            .iter()
+            .zip(message.notarizations.iter())
+        {
+            assert_eq!(decoded_not.proposal, expected_not.proposal);
+            assert_eq!(decoded_not.certificate.0, expected_not.certificate.0);
+            assert_eq!(decoded_not.certificate.1, expected_not.certificate.1);
+        }
+
+        for (decoded_null, expected_null) in decoded
+            .nullifications
+            .iter()
+            .zip(message.nullifications.iter())
+        {
+            assert_eq!(decoded_null.round, expected_null.round);
+            assert_eq!(decoded_null.certificate.0, expected_null.certificate.0);
+            assert_eq!(decoded_null.certificate.1, expected_null.certificate.1);
+        }
     }
 }

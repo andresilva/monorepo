@@ -210,7 +210,11 @@ pub(crate) fn interesting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{threshold_simplex::types::seed_namespace, types::Round, Monitor};
+    use crate::{
+        threshold_simplex::{mocks::signing, types::seed_namespace},
+        types::Round,
+        Monitor,
+    };
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
@@ -415,6 +419,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme,
                     blocker,
@@ -422,6 +432,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -644,6 +655,7 @@ mod tests {
             // Derive threshold
             let (polynomial, shares) =
                 ops::generate_shares::<_, V>(&mut context, None, n_active, threshold);
+            let participant_count = validators.len();
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -657,12 +669,22 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
                 let share = if is_observer {
                     None
                 } else {
                     Some(shares[idx].clone())
                 };
+                let signing_ref = share
+                    .as_ref()
+                    .or_else(|| shares.first())
+                    .expect("at least one share for signing");
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    signing_ref,
+                    threshold as usize,
+                    participant_count,
+                );
+                let mut participants = BTreeMap::new();
                 participants.insert(0, (polynomial.clone(), validators.clone(), share));
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -690,6 +712,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -852,6 +875,12 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
+                    let signing = signing::scheme_for_share::<V>(
+                        &polynomial,
+                        &shares[idx],
+                        threshold as usize,
+                        validators.len(),
+                    );
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
@@ -859,6 +888,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        signing,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -1048,6 +1078,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx_scheme],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     blocker,
@@ -1055,6 +1091,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1176,6 +1213,12 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(scheme.public_key());
+            let signing = signing::scheme_for_share::<V>(
+                &polynomial,
+                &shares[0],
+                threshold as usize,
+                validators.len(),
+            );
             let cfg = config::Config {
                 crypto: scheme,
                 blocker,
@@ -1183,6 +1226,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 supervisor: supervisor.clone(),
+                signing,
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: 333,
@@ -1323,6 +1367,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx_scheme],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme,
                     blocker,
@@ -1330,6 +1380,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1590,6 +1641,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx_scheme],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme,
                     blocker,
@@ -1597,6 +1654,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1770,6 +1828,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     blocker,
@@ -1777,6 +1841,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1986,6 +2051,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     blocker,
@@ -1993,6 +2064,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -2198,6 +2270,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme,
                     blocker,
@@ -2205,6 +2283,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -2394,6 +2473,12 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
+                    let signing = signing::scheme_for_share::<V>(
+                        &polynomial,
+                        &shares[idx_scheme],
+                        threshold as usize,
+                        validators.len(),
+                    );
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
@@ -2401,6 +2486,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        signing,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2586,6 +2672,12 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
+                    let signing = signing::scheme_for_share::<V>(
+                        &polynomial,
+                        &shares[idx_scheme],
+                        threshold as usize,
+                        validators.len(),
+                    );
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
@@ -2593,6 +2685,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        signing,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2769,6 +2862,12 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
+                    let signing = signing::scheme_for_share::<V>(
+                        &polynomial,
+                        &shares[idx_scheme],
+                        threshold as usize,
+                        validators.len(),
+                    );
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
@@ -2776,6 +2875,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        signing,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2947,6 +3047,12 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
+                    let signing = signing::scheme_for_share::<V>(
+                        &polynomial,
+                        &shares[idx_scheme],
+                        threshold as usize,
+                        validators.len(),
+                    );
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
@@ -2954,6 +3060,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        signing,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -3122,6 +3229,12 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
+                    let signing = signing::scheme_for_share::<V>(
+                        &polynomial,
+                        &shares[idx_scheme],
+                        threshold as usize,
+                        validators.len(),
+                    );
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
@@ -3129,6 +3242,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        signing,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -3311,6 +3425,12 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(scheme.public_key());
+                    let signing = signing::scheme_for_share::<V>(
+                        &polynomial,
+                        &shares[idx_scheme],
+                        threshold as usize,
+                        validators.len(),
+                    );
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
@@ -3318,6 +3438,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: supervisor.clone(),
                         supervisor,
+                        signing,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -3468,6 +3589,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme,
                     blocker,
@@ -3475,6 +3602,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -3634,6 +3762,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(scheme.public_key());
+                let signing = signing::scheme_for_share::<V>(
+                    &polynomial,
+                    &shares[idx],
+                    threshold as usize,
+                    validators.len(),
+                );
                 let cfg = config::Config {
                     crypto: scheme,
                     blocker,
@@ -3641,6 +3775,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: supervisor.clone(),
                     supervisor,
+                    signing,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,

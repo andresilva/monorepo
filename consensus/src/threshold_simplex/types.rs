@@ -1,6 +1,7 @@
 //! Types used in [crate::threshold_simplex].
 
 use crate::{
+    threshold_simplex::signing::{self, SigningScheme, Vote, VoteContext},
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
@@ -114,7 +115,15 @@ pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
-pub struct BatchVerifier<V: Variant, D: Digest> {
+pub struct BatchVerifier<
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> {
     quorum: Option<usize>,
 
     leader: Option<u32>,
@@ -129,9 +138,20 @@ pub struct BatchVerifier<V: Variant, D: Digest> {
 
     finalizes: Vec<Finalize<V, D>>,
     finalizes_verified: usize,
+
+    signing: Option<G>,
 }
 
-impl<V: Variant, D: Digest> BatchVerifier<V, D> {
+impl<
+        V: Variant,
+        D: Digest,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    > BatchVerifier<V, D, G>
+{
     /// Creates a new `BatchVerifier`.
     ///
     /// # Arguments
@@ -139,7 +159,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     /// * `quorum` - An optional `u32` specifying the number of votes (2f+1)
     ///   required to reach a quorum. If `None`, batch verification readiness
     ///   checks based on quorum size are skipped.
-    pub fn new(quorum: Option<u32>) -> Self {
+    pub fn new(quorum: Option<u32>, signing: Option<G>) -> Self {
         Self {
             quorum: quorum.map(|q| q as usize),
 
@@ -155,6 +175,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
 
             finalizes: Vec::new(),
             finalizes_verified: 0,
+
+            signing,
         }
     }
 
@@ -286,8 +308,39 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         self.notarizes_force = false;
-        let (notarizes, failed) =
-            Notarize::verify_multiple(namespace, polynomial, std::mem::take(&mut self.notarizes));
+        let pending = std::mem::take(&mut self.notarizes);
+        let (mut notarizes, mut failed) = Notarize::verify_multiple(namespace, polynomial, pending);
+
+        if let (Some(signing), Some(first)) = (self.signing.as_ref(), notarizes.first()) {
+            let votes: Vec<Vote<G>> = notarizes
+                .iter()
+                .map(|notarize| Vote {
+                    signer: notarize.signer(),
+                    signature: (
+                        notarize.proposal_signature.value.clone(),
+                        notarize.seed_signature.value.clone(),
+                    ),
+                })
+                .collect();
+
+            let verification = signing.verify_votes::<D, _>(
+                VoteContext::Notarize {
+                    namespace,
+                    proposal: &first.proposal,
+                },
+                votes,
+            );
+
+            if !verification.invalid_signers.is_empty() {
+                let invalid: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+
+                if !invalid.is_empty() {
+                    notarizes.retain(|notarize| !invalid.contains(&notarize.signer()));
+                    failed.extend(invalid.into_iter());
+                }
+            }
+        }
+
         self.notarizes_verified += notarizes.len();
         (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
     }
@@ -360,8 +413,39 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         namespace: &[u8],
         polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        let (nullifies, failed) =
-            Nullify::verify_multiple(namespace, polynomial, std::mem::take(&mut self.nullifies));
+        let pending = std::mem::take(&mut self.nullifies);
+        let (mut nullifies, mut failed) = Nullify::verify_multiple(namespace, polynomial, pending);
+
+        if let (Some(signing), Some(first)) = (self.signing.as_ref(), nullifies.first()) {
+            let votes: Vec<Vote<G>> = nullifies
+                .iter()
+                .map(|nullify| Vote {
+                    signer: nullify.signer(),
+                    signature: (
+                        nullify.view_signature.value.clone(),
+                        nullify.seed_signature.value.clone(),
+                    ),
+                })
+                .collect();
+
+            let verification = signing.verify_votes::<D, _>(
+                VoteContext::Nullify {
+                    namespace,
+                    round: first.round,
+                },
+                votes,
+            );
+
+            if !verification.invalid_signers.is_empty() {
+                let invalid: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+
+                if !invalid.is_empty() {
+                    nullifies.retain(|nullify| !invalid.contains(&nullify.signer()));
+                    failed.extend(invalid.into_iter());
+                }
+            }
+        }
+
         self.nullifies_verified += nullifies.len();
         (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
     }
@@ -419,8 +503,39 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         namespace: &[u8],
         polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        let (finalizes, failed) =
-            Finalize::verify_multiple(namespace, polynomial, std::mem::take(&mut self.finalizes));
+        let pending = std::mem::take(&mut self.finalizes);
+        let (mut finalizes, mut failed) = Finalize::verify_multiple(namespace, polynomial, pending);
+
+        if let (Some(signing), Some(first)) = (self.signing.as_ref(), finalizes.first()) {
+            let votes: Vec<Vote<G>> = finalizes
+                .iter()
+                .map(|finalize| Vote {
+                    signer: finalize.signer(),
+                    signature: (
+                        finalize.proposal_signature.value.clone(),
+                        finalize.seed_signature.value.clone(),
+                    ),
+                })
+                .collect();
+
+            let verification = signing.verify_votes::<D, _>(
+                VoteContext::Finalize {
+                    namespace,
+                    proposal: &first.proposal,
+                },
+                votes,
+            );
+
+            if !verification.invalid_signers.is_empty() {
+                let invalid: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+
+                if !invalid.is_empty() {
+                    finalizes.retain(|finalize| !invalid.contains(&finalize.signer()));
+                    failed.extend(invalid.into_iter());
+                }
+            }
+        }
+
         self.finalizes_verified += finalizes.len();
         (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
     }
@@ -916,6 +1031,52 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
         )
         .is_ok()
     }
+
+    /// Convert this notarization into its signing module representation.
+    pub fn into_signing<S>(self) -> signing::Notarization<S, D>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        signing::Notarization {
+            proposal: self.proposal,
+            certificate: (self.proposal_signature, self.seed_signature),
+        }
+    }
+
+    /// Borrow this notarization as a signing module representation.
+    pub fn as_signing<S>(&self) -> signing::Notarization<S, D>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+        V::Signature: Clone,
+        Proposal<D>: Clone,
+    {
+        signing::Notarization {
+            proposal: self.proposal.clone(),
+            certificate: (self.proposal_signature.clone(), self.seed_signature.clone()),
+        }
+    }
+
+    /// Convert a signing module notarization into its legacy counterpart.
+    pub fn from_signing<S>(notarization: signing::Notarization<S, D>) -> Self
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        let (proposal_signature, seed_signature) = notarization.certificate;
+        Notarization {
+            proposal: notarization.proposal,
+            proposal_signature,
+            seed_signature,
+        }
+    }
 }
 
 impl<V: Variant, D: Digest> Epochable for Notarization<V, D> {
@@ -1203,6 +1364,51 @@ impl<V: Variant> Nullification<V> {
             1,
         )
         .is_ok()
+    }
+
+    /// Convert this nullification into its signing module representation.
+    pub fn into_signing<S>(self) -> signing::Nullification<S>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        signing::Nullification {
+            round: self.round,
+            certificate: (self.view_signature, self.seed_signature),
+        }
+    }
+
+    /// Borrow this nullification as a signing module representation.
+    pub fn as_signing<S>(&self) -> signing::Nullification<S>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+        V::Signature: Clone,
+    {
+        signing::Nullification {
+            round: self.round,
+            certificate: (self.view_signature.clone(), self.seed_signature.clone()),
+        }
+    }
+
+    /// Convert a signing module nullification into its legacy counterpart.
+    pub fn from_signing<S>(nullification: signing::Nullification<S>) -> Self
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        let (view_signature, seed_signature) = nullification.certificate;
+        Nullification {
+            round: nullification.round,
+            view_signature,
+            seed_signature,
+        }
     }
 }
 
@@ -1511,6 +1717,75 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
         )
         .is_ok()
     }
+
+    /// Convert this finalization into the signing module representation.
+    pub fn into_signing<S>(self) -> signing::Finalization<S, D>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        signing::Finalization {
+            proposal: self.proposal,
+            certificate: (self.proposal_signature, self.seed_signature),
+        }
+    }
+
+    /// Borrow this finalization as the signing module representation.
+    pub fn as_signing<S>(&self) -> signing::Finalization<S, D>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+        V::Signature: Clone,
+        Proposal<D>: Clone,
+    {
+        signing::Finalization {
+            proposal: self.proposal.clone(),
+            certificate: (self.proposal_signature.clone(), self.seed_signature.clone()),
+        }
+    }
+
+    /// Convert a signing module finalization into its legacy counterpart.
+    pub fn from_signing<S>(finalization: signing::Finalization<S, D>) -> Self
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        let (proposal_signature, seed_signature) = finalization.certificate;
+        Finalization {
+            proposal: finalization.proposal,
+            proposal_signature,
+            seed_signature,
+        }
+    }
+
+    /// Verify this finalization using a signing scheme implementation.
+    pub fn verify_with_scheme<S>(
+        &self,
+        scheme: &S,
+        namespace: &[u8],
+    ) -> Result<Option<S::Randomness>, signing::Error>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+        Proposal<D>: Clone,
+    {
+        let signing = self.as_signing::<S>();
+        scheme.verify_certificate(
+            signing::VoteContext::Finalize {
+                namespace,
+                proposal: &signing.proposal,
+            },
+            &signing.certificate,
+        )
+    }
 }
 
 impl<V: Variant, D: Digest> Epochable for Finalization<V, D> {
@@ -1568,15 +1843,20 @@ impl<V: Variant, D: Digest> Seedable<V> for Finalization<V, D> {
 
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Backfiller<V: Variant, D: Digest> {
+#[derive(Clone)]
+pub enum Backfiller<S: SigningScheme, D: Digest> {
     /// Request for missing notarizations and nullifications
     Request(Request),
     /// Response containing requested notarizations and nullifications
-    Response(Response<V, D>),
+    Response(signing::Response<S, D>),
 }
 
-impl<V: Variant, D: Digest> Write for Backfiller<V, D> {
+impl<S, D> Write for Backfiller<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: Write,
+    D: Digest,
+{
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Backfiller::Request(request) => {
@@ -1591,7 +1871,12 @@ impl<V: Variant, D: Digest> Write for Backfiller<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Backfiller<V, D> {
+impl<S, D> EncodeSize for Backfiller<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: EncodeSize,
+    D: Digest,
+{
     fn encode_size(&self) -> usize {
         1 + match self {
             Backfiller::Request(v) => v.encode_size(),
@@ -1600,7 +1885,12 @@ impl<V: Variant, D: Digest> EncodeSize for Backfiller<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Backfiller<V, D> {
+impl<S, D> Read for Backfiller<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: Read<Cfg = S::CertificateReadCfg>,
+    D: Digest,
+{
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
@@ -1611,7 +1901,7 @@ impl<V: Variant, D: Digest> Read for Backfiller<V, D> {
                 Ok(Backfiller::Request(v))
             }
             1 => {
-                let v = Response::<V, D>::read_cfg(reader, cfg)?;
+                let v = signing::Response::<S, D>::read_cfg(reader, cfg)?;
                 Ok(Backfiller::Response(v))
             }
             _ => Err(Error::Invalid(
@@ -1791,6 +2081,87 @@ impl<V: Variant, D: Digest> Response<V, D> {
         )
         .is_ok()
     }
+
+    /// Convert this response into the signing module representation.
+    pub fn into_signing<S>(self) -> signing::Response<S, D>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        signing::Response::new(
+            self.id,
+            self.notarizations
+                .into_iter()
+                .map(Notarization::into_signing::<S>)
+                .collect(),
+            self.nullifications
+                .into_iter()
+                .map(Nullification::into_signing::<S>)
+                .collect(),
+        )
+    }
+
+    /// Borrow this response as the signing module representation.
+    pub fn as_signing<S>(&self) -> signing::Response<S, D>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+        V::Signature: Clone,
+        Proposal<D>: Clone,
+    {
+        signing::Response::new(
+            self.id,
+            self.notarizations
+                .iter()
+                .map(Notarization::as_signing::<S>)
+                .collect(),
+            self.nullifications
+                .iter()
+                .map(Nullification::as_signing::<S>)
+                .collect(),
+        )
+    }
+
+    /// Verify this response using a signing scheme implementation.
+    pub fn verify_with_scheme<S>(&self, scheme: &S, namespace: &[u8]) -> Result<(), signing::Error>
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+        S::Randomness: Clone + PartialEq,
+        V::Signature: Clone,
+        Proposal<D>: Clone,
+    {
+        self.as_signing::<S>().verify(scheme, namespace)
+    }
+
+    /// Convert a signing module response into its legacy counterpart.
+    pub fn from_signing<S>(response: signing::Response<S, D>) -> Self
+    where
+        S: SigningScheme<
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        Response {
+            id: response.id,
+            notarizations: response
+                .notarizations
+                .into_iter()
+                .map(Notarization::from_signing::<S>)
+                .collect(),
+            nullifications: response
+                .nullifications
+                .into_iter()
+                .map(Nullification::from_signing::<S>)
+                .collect(),
+        }
+    }
 }
 
 impl<V: Variant, D: Digest> Write for Response<V, D> {
@@ -1856,20 +2227,25 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
 ///
 /// For this reason, it is not sound to use [PartialSignature]-backed [Activity] to reward participants
 /// for their contributions (as an attacker, for example, could forge contributions from offline participants).
-#[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub enum Activity<V: Variant, D: Digest> {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
     /// A single validator notarize over a proposal
     Notarize(Notarize<V, D>),
     /// A threshold signature for a notarization
-    Notarization(Notarization<V, D>),
+    Notarization(signing::Notarization<G, D>),
     /// A single validator nullify to skip the current view
     Nullify(Nullify<V>),
     /// A threshold signature for a nullification
-    Nullification(Nullification<V>),
+    Nullification(signing::Nullification<G>),
     /// A single validator finalize over a proposal
     Finalize(Finalize<V, D>),
     /// A threshold signature for a finalization
-    Finalization(Finalization<V, D>),
+    Finalization(signing::Finalization<G, D>),
     /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
     ConflictingNotarize(ConflictingNotarize<V, D>),
     /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
@@ -1878,7 +2254,12 @@ pub enum Activity<V: Variant, D: Digest> {
     NullifyFinalize(NullifyFinalize<V, D>),
 }
 
-impl<V: Variant, D: Digest> Activity<V, D> {
+impl<V, D, G> Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
     /// Indicates whether the activity has been verified by consensus.
     pub fn verified(&self) -> bool {
         match self {
@@ -1895,7 +2276,13 @@ impl<V: Variant, D: Digest> Activity<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for Activity<V, D> {
+impl<V, D, G> Write for Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+    G::Certificate: Write,
+{
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Notarize(v) => {
@@ -1938,7 +2325,13 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
+impl<V, D, G> EncodeSize for Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+    G::Certificate: EncodeSize,
+{
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Notarize(v) => v.encode_size(),
@@ -1954,7 +2347,13 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Activity<V, D> {
+impl<V, D, G> Read for Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+    G::Certificate: Read<Cfg = G::CertificateReadCfg>,
+{
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -1965,7 +2364,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
                 Ok(Activity::Notarize(v))
             }
             1 => {
-                let v = Notarization::<V, D>::read(reader)?;
+                let v = signing::Notarization::<G, D>::read(reader)?;
                 Ok(Activity::Notarization(v))
             }
             2 => {
@@ -1973,7 +2372,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
                 Ok(Activity::Nullify(v))
             }
             3 => {
-                let v = Nullification::<V>::read(reader)?;
+                let v = signing::Nullification::<G>::read(reader)?;
                 Ok(Activity::Nullification(v))
             }
             4 => {
@@ -1981,7 +2380,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
                 Ok(Activity::Finalize(v))
             }
             5 => {
-                let v = Finalization::<V, D>::read(reader)?;
+                let v = signing::Finalization::<G, D>::read(reader)?;
                 Ok(Activity::Finalization(v))
             }
             6 => {
@@ -2004,7 +2403,12 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for Activity<V, D> {
+impl<V, D, G> Epochable for Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
@@ -2022,7 +2426,12 @@ impl<V: Variant, D: Digest> Epochable for Activity<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for Activity<V, D> {
+impl<V, D, G> Viewable for Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
     type View = View;
 
     fn view(&self) -> View {
@@ -2510,6 +2919,7 @@ impl<V: Variant, D: Digest> EncodeSize for NullifyFinalize<V, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::threshold_simplex::signing::BlsThresholdScheme;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
@@ -2650,7 +3060,8 @@ mod tests {
         let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create nullification
-        let nullification = Nullification::new(round, view_signature, seed_signature);
+        let nullification: Nullification<MinSig> =
+            Nullification::new(round, view_signature, seed_signature);
         let encoded = nullification.encode();
         let decoded = Nullification::<MinSig>::decode(encoded).unwrap();
         assert_eq!(nullification, decoded);
@@ -2734,15 +3145,17 @@ mod tests {
     fn test_backfiller_encode_decode() {
         // Test Request
         let request = Request::new(1, vec![10, 11], vec![12, 13]);
-        let backfiller = Backfiller::<MinSig, Sha256>::Request(request.clone());
+        let backfiller = Backfiller::<BlsThresholdScheme<MinSig>, Sha256>::Request(request.clone());
         let encoded = backfiller.encode();
-        let decoded = Backfiller::<MinSig, Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded =
+            Backfiller::<BlsThresholdScheme<MinSig>, Sha256>::decode_cfg(encoded, &usize::MAX)
+                .unwrap();
         assert!(matches!(decoded, Backfiller::Request(r) if r == request));
 
         // Test Response
         let n = 5;
         let t = quorum(n);
-        let (_, _, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
 
         // Create a notarization
         let round = Round::new(0, 10);
@@ -2771,13 +3184,29 @@ mod tests {
         let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
         let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
-        let nullification = Nullification::new(round, view_signature, seed_signature);
+        let nullification: Nullification<MinSig> =
+            Nullification::new(round, view_signature, seed_signature);
 
         // Create a response
         let response = Response::new(1, vec![notarization], vec![nullification]);
-        let backfiller = Backfiller::<MinSig, Sha256>::Response(response.clone());
+        let scheme = BlsThresholdScheme::<MinSig>::new(
+            polynomial.clone(),
+            identity,
+            shares[0].clone(),
+            t as usize,
+        );
+        assert!(response
+            .verify_with_scheme::<BlsThresholdScheme<MinSig>>(&scheme, NAMESPACE)
+            .is_ok());
+        let backfiller = Backfiller::<BlsThresholdScheme<MinSig>, Sha256>::Response(
+            response
+                .clone()
+                .into_signing::<BlsThresholdScheme<MinSig>>(),
+        );
         let encoded = backfiller.encode();
-        let decoded = Backfiller::<MinSig, Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded =
+            Backfiller::<BlsThresholdScheme<MinSig>, Sha256>::decode_cfg(encoded, &usize::MAX)
+                .unwrap();
         assert!(matches!(decoded, Backfiller::Response(r) if r.id == response.id));
     }
 
@@ -3205,7 +3634,8 @@ mod tests {
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 123);
 
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
 
         let round = Round::new(0, 1);
         let notarize1_s0 = create_notarize(&shares[0], round, 0, 1); // validator 0
@@ -3242,7 +3672,8 @@ mod tests {
         assert_eq!(verifier.notarizes.len(), 2); // Should not have been added
 
         // Test adding when leader is set, but proposal comes from non-leader first
-        let mut verifier2 = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier2 =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 2);
         let notarize_s1_v2 = create_notarize(&shares[1], round, 1, 3); // from validator 1
         let notarize_s0_v2_leader = create_notarize(&shares[0], round, 1, 3); // from validator 0 (leader)
@@ -3266,7 +3697,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 124);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
 
         let round = Round::new(0, 1);
         let notarize_s0 = create_notarize(&shares[0], round, 0, 1);
@@ -3300,7 +3732,8 @@ mod tests {
         let threshold = quorum(n_validators); // threshold = 4
         let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 125);
 
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let proposal = Proposal::new(Round::new(0, 1), 0, sample_digest(1));
 
         let notarize_s0 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal.clone());
@@ -3343,7 +3776,8 @@ mod tests {
         assert!(!verifier.ready_notarizes());
 
         // Scenario: Verification with a faulty signature
-        let mut verifier2 = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier2 =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         verifier2.set_leader(shares[0].index); // Set leader
         let round = Round::new(0, 2);
         let leader_notarize = create_notarize(&shares[0], round, 1, 10);
@@ -3374,7 +3808,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 127);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
 
         let round = Round::new(0, 1);
         let nullify1_s0 = create_nullify(&shares[0], round);
@@ -3395,7 +3830,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 128);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
 
         let round = Round::new(0, 1);
         let nullify_s0 = create_nullify(&shares[0], round);
@@ -3431,7 +3867,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 129);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
 
         let round = Round::new(0, 1);
         let finalize_s0_prop_a = create_finalize(&shares[0], round, 0, 1); // Proposal A
@@ -3473,7 +3910,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 130);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));
 
@@ -3526,7 +3964,8 @@ mod tests {
         let round = Round::new(0, 1);
 
         // Test with Notarizes
-        let mut verifier_n = BatchVerifier::<MinSig, Sha256>::new(None);
+        let mut verifier_n =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(None, None);
         let prop1 = Proposal::new(round, 0, sample_digest(1));
         let notarize1 = create_notarize(&shares[0], round, 0, 1);
 
@@ -3542,7 +3981,8 @@ mod tests {
         assert!(!verifier_n.ready_notarizes()); // notarizes_force is false, list is empty
 
         // Test with Nullifies
-        let mut verifier_null = BatchVerifier::<MinSig, Sha256>::new(None);
+        let mut verifier_null =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(None, None);
         let nullify1 = create_nullify(&shares[0], round);
         assert!(!verifier_null.ready_nullifies()); // List is empty
         verifier_null.add(Voter::Nullify(nullify1.clone()), false);
@@ -3554,7 +3994,8 @@ mod tests {
         assert!(!verifier_null.ready_nullifies()); // List is empty
 
         // Test with Finalizes
-        let mut verifier_f = BatchVerifier::<MinSig, Sha256>::new(None);
+        let mut verifier_f =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(None, None);
         let finalize1 = create_finalize(&shares[0], round, 0, 1);
         assert!(!verifier_f.ready_finalizes()); // No leader/proposal
         verifier_f.set_leader(shares[0].index);
@@ -3573,7 +4014,8 @@ mod tests {
         let n_validators = 3;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 201);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
 
         let round = Round::new(0, 1);
         let proposal_a = Proposal::new(round, 0, sample_digest(10));
@@ -3607,7 +4049,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "self.leader.is_none()")]
     fn test_batch_verifier_set_leader_twice_panics() {
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(3));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(3), None);
         verifier.set_leader(0);
         verifier.set_leader(1); // This should panic
     }
@@ -3618,7 +4061,8 @@ mod tests {
         let n_validators = 3;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 202);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         let notarization = create_notarization(round, 0, 1, &shares, threshold);
@@ -3630,7 +4074,8 @@ mod tests {
         let n_validators = 3;
         let threshold = quorum(n_validators);
         let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 203);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         let leader_notarize = create_notarize(&shares[0], round, 0, 1);
@@ -3668,7 +4113,8 @@ mod tests {
         let n_validators = 3;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 204);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         // Collect sufficient number of unverified notarizes
@@ -3696,7 +4142,8 @@ mod tests {
         let n_validators = 3;
         let threshold = quorum(n_validators);
         let (_, _, shares) = generate_test_data(n_validators, threshold, 205);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         for i in 0..threshold {
@@ -3722,7 +4169,8 @@ mod tests {
     fn test_verify_notarizes_empty_pending_when_forced() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));
@@ -3738,7 +4186,8 @@ mod tests {
         let n_validators = 3;
         let threshold = quorum(n_validators);
         let (_, polynomial, _) = generate_test_data(n_validators, threshold, 207);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
 
         assert!(verifier.nullifies.is_empty());
         // ready_nullifies will be false if the list is empty and quorum is Some
@@ -3755,7 +4204,8 @@ mod tests {
         let n_validators = 3;
         let threshold = quorum(n_validators);
         let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 208);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
 
         // ready_finalizes will be false if the list is empty and quorum is Some
         verifier.set_leader(shares[0].index);
@@ -3773,7 +4223,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 209);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         let leader_notarize = create_notarize(&shares[0], round, 0, 1);
@@ -3809,7 +4260,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, _, shares) = generate_test_data(n_validators, threshold, 210);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         verifier.add(Voter::Nullify(create_nullify(&shares[0], round)), true); // 1 verified
@@ -3827,7 +4279,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, _, shares) = generate_test_data(n_validators, threshold, 211);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));
@@ -3852,7 +4305,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, _, shares) = generate_test_data(n_validators, threshold, 212);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         let leader_notarize = create_notarize(&shares[0], round, 0, 1);
@@ -3883,7 +4337,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, _, shares) = generate_test_data(n_validators, threshold, 213);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         for share in shares.iter().take(threshold as usize) {
@@ -3904,7 +4359,8 @@ mod tests {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
         let (_, _, shares) = generate_test_data(n_validators, threshold, 214);
-        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+        let mut verifier =
+            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
         let round = Round::new(0, 1);
 
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));

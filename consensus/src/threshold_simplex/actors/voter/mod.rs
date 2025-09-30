@@ -26,10 +26,16 @@ pub struct Config<
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<V, D>>,
+    F: Reporter,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    G: SigningScheme,
-> {
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+> where
+    F: Reporter<Activity = Activity<V, D, G>>,
+{
     pub crypto: C,
     pub blocker: B,
     pub automaton: A,
@@ -57,7 +63,7 @@ mod tests {
     use crate::{
         threshold_simplex::{
             actors::{batcher, resolver},
-            mocks,
+            mocks::{self, signing},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -153,6 +159,12 @@ mod tests {
                 application_cfg,
             );
             actor.start();
+            let signing_scheme = signing::scheme_for_share::<MinSig>(
+                &polynomial,
+                &shares[0],
+                threshold as usize,
+                validators.len(),
+            );
             let cfg = Config {
                 crypto: scheme,
                 blocker: oracle.control(validator.clone()),
@@ -160,6 +172,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 supervisor,
+                signing: signing_scheme,
                 partition: "test".to_string(),
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -467,6 +480,12 @@ mod tests {
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
             actor.start();
+            let signing_scheme = signing::scheme_for_share::<MinSig>(
+                &polynomial,
+                &shares[0],
+                threshold as usize,
+                validators.len(),
+            );
             let voter_config = Config {
                 crypto: private_key.clone(),
                 blocker: oracle.control(validator.clone()),
@@ -474,6 +493,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 supervisor: supervisor.clone(),
+                signing: signing_scheme,
                 partition: format!("voter_actor_test_{validator}"),
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -858,6 +878,12 @@ mod tests {
             actor.start();
 
             // Initialize voter actor
+            let signing_scheme = signing::scheme_for_share::<MinSig>(
+                &polynomial,
+                &shares[0],
+                threshold as usize,
+                validators.len(),
+            );
             let voter_cfg = Config {
                 crypto: private_keys[0].clone(),
                 blocker: oracle.control(validators[0].clone()),
@@ -865,6 +891,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 supervisor: supervisor.clone(),
+                signing: signing_scheme,
                 partition: "voter_finalization_test".to_string(),
                 epoch: 333,
                 namespace: namespace.clone(),

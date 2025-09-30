@@ -3,6 +3,7 @@ mod ingress;
 
 use crate::{threshold_simplex::signing::SigningScheme, types::Epoch, Supervisor};
 pub use actor::Actor;
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::PublicKey;
 use commonware_p2p::Blocker;
 use governor::Quota;
@@ -11,7 +12,11 @@ pub use ingress::Mailbox;
 pub use ingress::Message;
 use std::time::Duration;
 
-pub struct Config<C: PublicKey, B: Blocker, S: Supervisor, G: SigningScheme> {
+pub struct Config<C: PublicKey, B: Blocker, S: Supervisor, G: SigningScheme>
+where
+    G::Randomness: Clone + PartialEq,
+    G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
+{
     pub crypto: C,
     pub blocker: B,
     pub supervisor: S,
