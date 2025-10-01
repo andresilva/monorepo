@@ -335,7 +335,7 @@ where
 
     pub fn start(
         mut self,
-        voter: voter::Mailbox<V, G, D>,
+        voter: voter::Mailbox<G, D>,
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
@@ -344,7 +344,7 @@ where
 
     async fn run(
         mut self,
-        mut voter: voter::Mailbox<V, G, D>,
+        mut voter: voter::Mailbox<G, D>,
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) {

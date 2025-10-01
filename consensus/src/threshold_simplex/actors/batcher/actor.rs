@@ -6,12 +6,12 @@ use crate::{
         metrics::Inbound,
         signing::{self, SigningScheme},
         types::{
-            Activity, BatchVerifier, ConflictingFinalize, ConflictingNotarize, Finalize, LegacyVoter,
-            Notarize, Nullify, NullifyFinalize, Voter,
+            Activity, BatchVerifier, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize, Nullify,
+            NullifyFinalize, Voter,
         },
     },
     types::{Epoch, View},
-    Epochable, Reporter, ThresholdSupervisor, Viewable,
+    Reporter, ThresholdSupervisor,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
@@ -313,39 +313,27 @@ where
         self.verifier.ready_notarizes()
     }
 
-    fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<LegacyVoter<V, D>>, Vec<u32>) {
+    fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
         let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        let (voters, failed) = self.verifier.verify_notarizes(namespace, polynomial);
-        (
-            voters.into_iter().map(LegacyVoter::from).collect(),
-            failed,
-        )
+        self.verifier.verify_notarizes(namespace, polynomial)
     }
 
     fn ready_nullifies(&self) -> bool {
         self.verifier.ready_nullifies()
     }
 
-    fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<LegacyVoter<V, D>>, Vec<u32>) {
+    fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
         let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        let (voters, failed) = self.verifier.verify_nullifies(namespace, polynomial);
-        (
-            voters.into_iter().map(LegacyVoter::from).collect(),
-            failed,
-        )
+        self.verifier.verify_nullifies(namespace, polynomial)
     }
 
     fn ready_finalizes(&self) -> bool {
         self.verifier.ready_finalizes()
     }
 
-    fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<LegacyVoter<V, D>>, Vec<u32>) {
+    fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
         let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        let (voters, failed) = self.verifier.verify_finalizes(namespace, polynomial);
-        (
-            voters.into_iter().map(LegacyVoter::from).collect(),
-            failed,
-        )
+        self.verifier.verify_finalizes(namespace, polynomial)
     }
 
     fn is_active(&self, leader: &C) -> Option<bool> {
@@ -385,7 +373,7 @@ pub struct Actor<
     epoch: Epoch,
     namespace: Vec<u8>,
 
-    mailbox_receiver: mpsc::Receiver<Message<C, V, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<C, G, D>>,
 
     added: Counter,
     verified: Counter,
@@ -418,7 +406,7 @@ impl<
 where
     R: Reporter<Activity = Activity<V, D, G>>,
 {
-    pub fn new(context: E, cfg: Config<B, R, S, G>) -> (Self, Mailbox<C, V, D>) {
+    pub fn new(context: E, cfg: Config<B, R, S, G>) -> (Self, Mailbox<C, G, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -475,7 +463,7 @@ where
 
     pub fn start(
         mut self,
-        consensus: voter::Mailbox<V, G, D>,
+        consensus: voter::Mailbox<G, D>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(consensus, receiver))
@@ -483,11 +471,11 @@ where
 
     pub async fn run(
         mut self,
-        mut consensus: voter::Mailbox<V, G, D>,
+        mut consensus: voter::Mailbox<G, D>,
         receiver: impl Receiver<PublicKey = C>,
     ) {
         // Wrap channel
-        let mut receiver: WrappedReceiver<_, LegacyVoter<V, D>> =
+        let mut receiver: WrappedReceiver<_, Voter<G, D>> =
             WrappedReceiver::new((), receiver);
 
         // Initialize view data structures
@@ -565,8 +553,6 @@ where
                             ) {
                                 continue;
                             }
-
-                            let message: Voter<G, D> = message.into();
 
                             // Add the message to the verifier
                             work.entry(view).or_insert(
@@ -680,7 +666,7 @@ where
             trace!(view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
-            consensus.verified(voters).await;
+            consensus.verified_signing(voters).await;
 
             // Block invalid signers
             if !failed.is_empty() {

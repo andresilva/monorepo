@@ -7,8 +7,8 @@ use crate::{
         min_active,
         signing::{self, SigningScheme, Vote, VoteContext},
         types::{
-            Activity, Attributable, Context, LegacyActivity, Finalization, Finalize, LegacyVoter, Notarization,
-            Notarize, Nullification, Nullify, Proposal, Voter,
+            Activity, Attributable, Context, LegacyActivity, Finalization, Finalize, Notarization, Notarize,
+            Nullification, Nullify, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -668,7 +668,7 @@ impl<
 where
     F: Reporter<Activity = Activity<V, D, G>>,
 {
-    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S, G>) -> (Self, Mailbox<V, G, D>) {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S, G>) -> (Self, Mailbox<G, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -922,9 +922,9 @@ where
 
     async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
-        batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
-        pending_sender: &mut WrappedSender<Sp, LegacyVoter<V, D>>,
-        recovered_sender: &mut WrappedSender<Sr, LegacyVoter<V, D>>,
+        batcher: &mut batcher::Mailbox<C::PublicKey, G, D>,
+        pending_sender: &mut WrappedSender<Sp, Voter<G, D>>,
+        recovered_sender: &mut WrappedSender<Sr, Voter<G, D>>,
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
@@ -951,7 +951,8 @@ where
                 self.outbound_messages
                     .get_or_create(&metrics::FINALIZATION)
                     .inc();
-                let msg = LegacyVoter::Finalization(finalization);
+                let signing = finalization.clone().into_signing::<G>();
+                let msg = Voter::Finalization(signing);
                 recovered_sender
                     .send(Recipients::All, msg, true)
                     .await
@@ -961,7 +962,8 @@ where
                 self.outbound_messages
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
-                let msg = LegacyVoter::Notarization(notarization);
+                let signing = notarization.clone().into_signing::<G>();
+                let msg = Voter::Notarization(signing);
                 recovered_sender
                     .send(Recipients::All, msg, true)
                     .await
@@ -972,7 +974,8 @@ where
                 self.outbound_messages
                     .get_or_create(&metrics::NULLIFICATION)
                     .inc();
-                let msg = LegacyVoter::Nullification(nullification);
+                let signing = nullification.clone().into_signing::<G>();
+                let msg = Voter::Nullification(signing);
                 recovered_sender
                     .send(Recipients::All, msg, true)
                     .await
@@ -992,7 +995,10 @@ where
 
         // Handle the nullify
         if !retry {
-            batcher.constructed(LegacyVoter::Nullify(nullify.clone())).await;
+            let signing_nullify = nullify.clone().into_signing::<G>();
+            batcher
+                .constructed(Voter::Nullify(signing_nullify.clone()))
+                .await;
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal
@@ -1008,9 +1014,9 @@ where
         self.outbound_messages
             .get_or_create(&metrics::NULLIFY)
             .inc();
-        let msg = LegacyVoter::Nullify(nullify);
+        let signing = nullify.clone().into_signing::<G>();
         pending_sender
-            .send(Recipients::All, msg, true)
+            .send(Recipients::All, Voter::Nullify(signing), true)
             .await
             .unwrap();
         debug!(view = self.view, "broadcasted nullify");
@@ -1687,10 +1693,10 @@ where
 
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
-        batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
+        batcher: &mut batcher::Mailbox<C::PublicKey, G, D>,
         resolver: &mut resolver::Mailbox<G, D>,
-        pending_sender: &mut WrappedSender<Sp, LegacyVoter<V, D>>,
-        recovered_sender: &mut WrappedSender<Sr, LegacyVoter<V, D>>,
+        pending_sender: &mut WrappedSender<Sp, Voter<G, D>>,
+        recovered_sender: &mut WrappedSender<Sr, Voter<G, D>>,
         view: u64,
     ) {
         // Attempt to notarize
@@ -1699,7 +1705,10 @@ where
             self.outbound_messages
                 .get_or_create(&metrics::NOTARIZE)
                 .inc();
-            batcher.constructed(LegacyVoter::Notarize(notarize.clone())).await;
+            let signing_notarize = notarize.clone().into_signing::<G>();
+            batcher
+                .constructed(Voter::Notarize(signing_notarize.clone()))
+                .await;
             self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
@@ -1711,9 +1720,9 @@ where
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            let msg = LegacyVoter::Notarize(notarize);
+            let signing = notarize.clone().into_signing::<G>();
             pending_sender
-                .send(Recipients::All, msg, true)
+                .send(Recipients::All, Voter::Notarize(signing), true)
                 .await
                 .unwrap();
         };
@@ -1751,9 +1760,9 @@ where
                 .report(Activity::from(LegacyActivity::Notarization(signing_notarization))).await;
 
             // Broadcast the notarization
-            let msg = LegacyVoter::Notarization(notarization.clone());
+            let signing_clone = notarization.clone().into_signing::<G>();
             recovered_sender
-                .send(Recipients::All, msg, true)
+                .send(Recipients::All, Voter::Notarization(signing_clone), true)
                 .await
                 .unwrap();
         };
@@ -1786,9 +1795,9 @@ where
                 .report(Activity::from(LegacyActivity::Nullification(signing_nullification))).await;
 
             // Broadcast the nullification
-            let msg = LegacyVoter::Nullification(nullification.clone());
+            let signing_clone = nullification.clone().into_signing::<G>();
             recovered_sender
-                .send(Recipients::All, msg, true)
+                .send(Recipients::All, Voter::Nullification(signing_clone), true)
                 .await
                 .unwrap();
 
@@ -1827,9 +1836,9 @@ where
                     if let Some(finalization) =
                         self.construct_finalization(self.last_finalized, true).await
                     {
-                        let msg = LegacyVoter::Finalization(finalization.clone());
+                        let signing = finalization.clone().into_signing::<G>();
                         recovered_sender
-                            .send(Recipients::All, msg, true)
+                            .send(Recipients::All, Voter::Finalization(signing), true)
                             .await
                             .expect("unable to broadcast finalization");
                     } else {
@@ -1848,7 +1857,10 @@ where
             self.outbound_messages
                 .get_or_create(&metrics::FINALIZE)
                 .inc();
-            batcher.constructed(LegacyVoter::Finalize(finalize.clone())).await;
+            let signing_finalize = finalize.clone().into_signing::<G>();
+            batcher
+                .constructed(Voter::Finalize(signing_finalize.clone()))
+                .await;
             self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
@@ -1860,9 +1872,9 @@ where
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            let msg = LegacyVoter::Finalize(finalize.clone());
+            let signing_broadcast = finalize.clone().into_signing::<G>();
             pending_sender
-                .send(Recipients::All, msg, true)
+                .send(Recipients::All, Voter::Finalize(signing_broadcast), true)
                 .await
                 .unwrap();
         };
@@ -1899,9 +1911,9 @@ where
                 .report(Activity::from(LegacyActivity::Finalization(signing_finalization))).await;
 
             // Broadcast the finalization
-            let msg = LegacyVoter::Finalization(finalization.clone());
+            let signing_broadcast = finalization.clone().into_signing::<G>();
             recovered_sender
-                .send(Recipients::All, msg, true)
+                .send(Recipients::All, Voter::Finalization(signing_broadcast), true)
                 .await
                 .unwrap();
         };
@@ -1909,7 +1921,7 @@ where
 
     pub fn start(
         mut self,
-        batcher: batcher::Mailbox<C::PublicKey, V, D>,
+        batcher: batcher::Mailbox<C::PublicKey, G, D>,
         resolver: resolver::Mailbox<G, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
@@ -1926,7 +1938,7 @@ where
 
     async fn run(
         mut self,
-        mut batcher: batcher::Mailbox<C::PublicKey, V, D>,
+        mut batcher: batcher::Mailbox<C::PublicKey, G, D>,
         mut resolver: resolver::Mailbox<G, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
@@ -1935,7 +1947,7 @@ where
         // Wrap channel
         let mut pending_sender = WrappedSender::new(pending_sender);
         let (mut recovered_sender, mut recovered_receiver) =
-            wrap::<_, _, LegacyVoter<V, D>>((), recovered_sender, recovered_receiver);
+            wrap::<_, _, Voter<G, D>>((), recovered_sender, recovered_receiver);
 
         // Compute genesis
         let genesis = self.automaton.genesis(self.epoch).await;
@@ -2299,25 +2311,32 @@ where
                     // configuration for handling `future` messages.
                     view = msg.view();
                     let action = match msg {
-                        LegacyVoter::Notarization(notarization) => {
+                        Voter::Notarization(signing_notarization) => {
+                            let notarization = Notarization::from_signing::<G>(
+                                signing_notarization.clone(),
+                            );
                             self.inbound_messages
                                 .get_or_create(&Inbound::notarization(&sender))
                                 .inc();
                             self.notarization(notarization).await
                         }
-                        LegacyVoter::Nullification(nullification) => {
+                        Voter::Nullification(signing_nullification) => {
+                            let nullification =
+                                Nullification::from_signing::<G>(signing_nullification.clone());
                             self.inbound_messages
                                 .get_or_create(&Inbound::nullification(&sender))
                                 .inc();
                             self.nullification(nullification).await
                         }
-                        LegacyVoter::Finalization(finalization) => {
+                        Voter::Finalization(signing_finalization) => {
+                            let finalization =
+                                Finalization::from_signing::<G>(signing_finalization.clone());
                             self.inbound_messages
                                 .get_or_create(&Inbound::finalization(&sender))
                                 .inc();
                             self.finalization(finalization).await
                         }
-                        LegacyVoter::Notarize(_) | LegacyVoter::Nullify(_) | LegacyVoter::Finalize(_) => {
+                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
                             warn!(?sender, "blocking peer for invalid message type");
                             self.blocker.block(sender).await;
                             continue;

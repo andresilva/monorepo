@@ -345,7 +345,7 @@ mod tests {
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
             mailbox
-                .verified(vec![Voter::Notarization(notarization)])
+                .verified_signing(vec![Voter::Notarization(notarization)])
                 .await;
 
             // Send new finalization (view 300)
@@ -968,7 +968,9 @@ mod tests {
             .unwrap();
 
             for finalize in finalizes.iter().cloned() {
-                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+                mailbox
+                    .verified_signing(vec![Voter::Finalize(finalize)])
+                    .await;
             }
 
             // Wait for the actor to report the finalization
