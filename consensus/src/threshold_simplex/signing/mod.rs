@@ -28,6 +28,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt::Debug,
     hash::Hash,
+    iter,
 };
 use thiserror::Error;
 
@@ -249,6 +250,28 @@ where
     {
         self.vote.signer.clone()
     }
+
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> Result<(), Error>
+    where
+        S::SignerId: Clone,
+    {
+        let verification = scheme.verify_votes::<D, _>(
+            VoteContext::Notarize {
+                namespace,
+                proposal: &self.proposal,
+            },
+            iter::once(self.vote.clone()),
+        );
+
+        if verification.invalid_signers.is_empty() && verification.verified.len() == 1 {
+            Ok(())
+        } else {
+            Err(Error::InsufficientVotes {
+                required: 1,
+                actual: verification.verified.len(),
+            })
+        }
+    }
 }
 
 /// Partial nullify vote for a given round.
@@ -322,6 +345,28 @@ where
         S::SignerId: Clone,
     {
         self.vote.signer.clone()
+    }
+
+    pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> Result<(), Error>
+    where
+        S::SignerId: Clone,
+    {
+        let verification = scheme.verify_votes::<D, _>(
+            VoteContext::Nullify {
+                namespace,
+                round: self.round,
+            },
+            iter::once(self.vote.clone()),
+        );
+
+        if verification.invalid_signers.is_empty() && verification.verified.len() == 1 {
+            Ok(())
+        } else {
+            Err(Error::InsufficientVotes {
+                required: 1,
+                actual: verification.verified.len(),
+            })
+        }
     }
 }
 
@@ -405,6 +450,28 @@ where
     {
         self.vote.signer.clone()
     }
+
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> Result<(), Error>
+    where
+        S::SignerId: Clone,
+    {
+        let verification = scheme.verify_votes::<D, _>(
+            VoteContext::Finalize {
+                namespace,
+                proposal: &self.proposal,
+            },
+            iter::once(self.vote.clone()),
+        );
+
+        if verification.invalid_signers.is_empty() && verification.verified.len() == 1 {
+            Ok(())
+        } else {
+            Err(Error::InsufficientVotes {
+                required: 1,
+                actual: verification.verified.len(),
+            })
+        }
+    }
 }
 
 /// Aggregated notarization certificate with randomness seed.
@@ -480,6 +547,23 @@ where
     pub fn epoch(&self) -> Epoch {
         self.proposal.round.epoch()
     }
+
+    pub fn verify(
+        &self,
+        scheme: &S,
+        namespace: &[u8],
+    ) -> Result<Option<S::Randomness>, Error>
+    where
+        S::Randomness: Clone + PartialEq,
+    {
+        scheme.verify_certificate::<D>(
+            VoteContext::Notarize {
+                namespace,
+                proposal: &self.proposal,
+            },
+            &self.certificate,
+        )
+    }
 }
 
 /// Aggregated nullification certificate for a round.
@@ -543,6 +627,23 @@ where
 
     pub fn epoch(&self) -> Epoch {
         self.round.epoch()
+    }
+
+    pub fn verify<D: Digest>(
+        &self,
+        scheme: &S,
+        namespace: &[u8],
+    ) -> Result<Option<S::Randomness>, Error>
+    where
+        S::Randomness: Clone + PartialEq,
+    {
+        scheme.verify_certificate::<D>(
+            VoteContext::Nullify {
+                namespace,
+                round: self.round,
+            },
+            &self.certificate,
+        )
     }
 }
 
@@ -762,6 +863,23 @@ where
 
     pub fn epoch(&self) -> Epoch {
         self.proposal.round.epoch()
+    }
+
+    pub fn verify(
+        &self,
+        scheme: &S,
+        namespace: &[u8],
+    ) -> Result<Option<S::Randomness>, Error>
+    where
+        S::Randomness: Clone + PartialEq,
+    {
+        scheme.verify_certificate::<D>(
+            VoteContext::Finalize {
+                namespace,
+                proposal: &self.proposal,
+            },
+            &self.certificate,
+        )
     }
 }
 

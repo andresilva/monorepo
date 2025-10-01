@@ -105,6 +105,7 @@ where
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+            
             },
         );
 
@@ -130,6 +131,7 @@ where
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 buffer_pool: cfg.buffer_pool,
+            
             },
         );
 
@@ -149,6 +151,7 @@ where
                 fetch_concurrent: cfg.fetch_concurrent,
                 max_fetch_count: cfg.max_fetch_count,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
+            
             },
         );
 

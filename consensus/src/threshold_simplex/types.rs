@@ -23,8 +23,9 @@ use commonware_cryptography::{
 };
 use commonware_utils::union;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     hash::Hash,
+    marker::PhantomData,
 };
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -2171,235 +2172,6 @@ impl Read for Request {
     }
 }
 
-/// Response is a message containing the requested notarizations and nullifications.
-/// This is sent in response to a Request message.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LegacyResponse<V: Variant, D: Digest> {
-    /// Identifier matching the original request
-    pub id: u64,
-    /// Notarizations for the requested views
-    pub notarizations: Vec<Notarization<V, D>>,
-    /// Nullifications for the requested views
-    pub nullifications: Vec<Nullification<V>>,
-}
-
-impl<V: Variant, D: Digest> LegacyResponse<V, D> {
-    /// Creates a new response with the given id, notarizations, and nullifications.
-    pub fn new(
-        id: u64,
-        notarizations: Vec<Notarization<V, D>>,
-        nullifications: Vec<Nullification<V>>,
-    ) -> Self {
-        LegacyResponse {
-            id,
-            notarizations,
-            nullifications,
-        }
-    }
-
-    /// Verifies the signatures on this response using BLS aggregate verification.
-    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
-        // Prepare to verify
-        if self.notarizations.is_empty() && self.nullifications.is_empty() {
-            return true;
-        }
-        let mut seeds = HashMap::new();
-        let mut messages = Vec::new();
-        let mut signatures = Vec::new();
-
-        // Parse all notarizations
-        let notarize_namespace = notarize_namespace(namespace);
-        let seed_namespace = seed_namespace(namespace);
-        for notarization in self.notarizations.iter() {
-            // Prepare notarize message
-            let notarize_message = notarization.proposal.encode().to_vec();
-            let notarize_message = (Some(notarize_namespace.as_slice()), notarize_message);
-            messages.push(notarize_message);
-            signatures.push(&notarization.proposal_signature);
-
-            // Add seed message (if not already present)
-            if let Some(previous) = seeds.get(&notarization.proposal.view()) {
-                if *previous != &notarization.seed_signature {
-                    return false;
-                }
-            } else {
-                let seed_message: Vec<u8> = notarization.proposal.round.encode().into();
-                let seed_message = (Some(seed_namespace.as_slice()), seed_message);
-                messages.push(seed_message);
-                signatures.push(&notarization.seed_signature);
-                seeds.insert(notarization.proposal.view(), &notarization.seed_signature);
-            }
-        }
-
-        // Parse all nullifications
-        let nullify_namespace = nullify_namespace(namespace);
-        for nullification in self.nullifications.iter() {
-            // Prepare nullify message
-            let nullify_message: Vec<u8> = nullification.round.encode().into();
-            let nullify_message = (Some(nullify_namespace.as_slice()), nullify_message);
-            messages.push(nullify_message);
-            signatures.push(&nullification.view_signature);
-
-            // Add seed message (if not already present)
-            if let Some(previous) = seeds.get(&nullification.view()) {
-                if *previous != &nullification.seed_signature {
-                    return false;
-                }
-            } else {
-                let seed_message: Vec<u8> = nullification.round.encode().into();
-                let seed_message = (Some(seed_namespace.as_slice()), seed_message);
-                messages.push(seed_message);
-                signatures.push(&nullification.seed_signature);
-                seeds.insert(nullification.view(), &nullification.seed_signature);
-            }
-        }
-
-        // Aggregate signatures
-        let signature = aggregate_signatures::<V, _>(signatures);
-        aggregate_verify_multiple_messages::<V, _>(
-            identity,
-            &messages
-                .iter()
-                .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
-                .collect::<Vec<_>>(),
-            &signature,
-            1,
-        )
-        .is_ok()
-    }
-
-    /// Convert this response into the signing module representation.
-    pub fn into_signing<S>(self) -> signing::Response<S, D>
-    where
-        S: SigningScheme<
-            Signature = (V::Signature, V::Signature),
-            Certificate = (V::Signature, V::Signature),
-        >,
-    {
-        signing::Response::new(
-            self.id,
-            self.notarizations
-                .into_iter()
-                .map(Notarization::into_signing::<S>)
-                .collect(),
-            self.nullifications
-                .into_iter()
-                .map(Nullification::into_signing::<S>)
-                .collect(),
-        )
-    }
-
-    /// Borrow this response as the signing module representation.
-    pub fn as_signing<S>(&self) -> signing::Response<S, D>
-    where
-        S: SigningScheme<
-            Signature = (V::Signature, V::Signature),
-            Certificate = (V::Signature, V::Signature),
-        >,
-        V::Signature: Clone,
-        Proposal<D>: Clone,
-    {
-        signing::Response::new(
-            self.id,
-            self.notarizations
-                .iter()
-                .map(Notarization::as_signing::<S>)
-                .collect(),
-            self.nullifications
-                .iter()
-                .map(Nullification::as_signing::<S>)
-                .collect(),
-        )
-    }
-
-    /// Verify this response using a signing scheme implementation.
-    pub fn verify_with_scheme<S>(&self, scheme: &S, namespace: &[u8]) -> Result<(), signing::Error>
-    where
-        S: SigningScheme<
-            Signature = (V::Signature, V::Signature),
-            Certificate = (V::Signature, V::Signature),
-        >,
-        S::Randomness: Clone + PartialEq,
-        V::Signature: Clone,
-        Proposal<D>: Clone,
-    {
-        self.as_signing::<S>().verify(scheme, namespace)
-    }
-
-    /// Convert a signing module response into its legacy counterpart.
-    pub fn from_signing<S>(response: signing::Response<S, D>) -> Self
-    where
-        S: SigningScheme<
-            Signature = (V::Signature, V::Signature),
-            Certificate = (V::Signature, V::Signature),
-        >,
-    {
-        LegacyResponse {
-            id: response.id,
-            notarizations: response
-                .notarizations
-                .into_iter()
-                .map(Notarization::from_signing::<S>)
-                .collect(),
-            nullifications: response
-                .nullifications
-                .into_iter()
-                .map(Nullification::from_signing::<S>)
-                .collect(),
-        }
-    }
-}
-
-impl<V: Variant, D: Digest> Write for LegacyResponse<V, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.id).write(writer);
-        self.notarizations.write(writer);
-        self.nullifications.write(writer);
-    }
-}
-
-impl<V: Variant, D: Digest> EncodeSize for LegacyResponse<V, D> {
-    fn encode_size(&self) -> usize {
-        UInt(self.id).encode_size()
-            + self.notarizations.encode_size()
-            + self.nullifications.encode_size()
-    }
-}
-
-impl<V: Variant, D: Digest> Read for LegacyResponse<V, D> {
-    type Cfg = usize;
-
-    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
-        let id = UInt::read(reader)?.into();
-        let mut views = HashSet::new();
-        let notarizations = Vec::<Notarization<V, D>>::read_range(reader, ..=*max_len)?;
-        for notarization in notarizations.iter() {
-            if !views.insert(notarization.proposal.view()) {
-                return Err(Error::Invalid(
-                    "consensus::threshold_simplex::LegacyResponse",
-                    "Duplicate notarization",
-                ));
-            }
-        }
-        let remaining = max_len - notarizations.len();
-        views.clear();
-        let nullifications = Vec::<Nullification<V>>::read_range(reader, ..=remaining)?;
-        for nullification in nullifications.iter() {
-            if !views.insert(nullification.view()) {
-                return Err(Error::Invalid(
-                    "consensus::threshold_simplex::LegacyResponse",
-                    "Duplicate nullification",
-                ));
-            }
-        }
-        Ok(LegacyResponse {
-            id,
-            notarizations,
-            nullifications,
-        })
-    }
-}
-
 #[derive(Clone)]
 pub struct Response<G: SigningScheme, D: Digest> {
     inner: signing::Response<G, D>,
@@ -2436,37 +2208,9 @@ impl<G: SigningScheme, D: Digest> Response<G, D> {
     }
 }
 
-impl<V, D, G> From<LegacyResponse<V, D>> for Response<G, D>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme<
-        SignerId = u32,
-        Signature = (V::Signature, V::Signature),
-        Certificate = (V::Signature, V::Signature),
-    >,
-{
-    fn from(response: LegacyResponse<V, D>) -> Self {
-        Response {
-            inner: response.into_signing::<G>(),
-        }
-    }
-}
 
-impl<V, D, G> From<Response<G, D>> for LegacyResponse<V, D>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme<
-        SignerId = u32,
-        Signature = (V::Signature, V::Signature),
-        Certificate = (V::Signature, V::Signature),
-    >,
-{
-    fn from(response: Response<G, D>) -> Self {
-        LegacyResponse::from_signing::<G>(response.inner)
-    }
-}
+
+
 
 impl<G: SigningScheme, D: Digest> EncodeSize for Response<G, D> {
     fn encode_size(&self) -> usize {
@@ -2509,9 +2253,9 @@ where
     Nullification(signing::Nullification<G>),
     Finalize(signing::Finalize<G, D>),
     Finalization(signing::Finalization<G, D>),
-    ConflictingNotarize(ConflictingNotarize<V, D>),
-    ConflictingFinalize(ConflictingFinalize<V, D>),
-    NullifyFinalize(NullifyFinalize<V, D>),
+    ConflictingNotarize(ConflictingNotarize<V, G, D>),
+    ConflictingFinalize(ConflictingFinalize<V, G, D>),
+    NullifyFinalize(NullifyFinalize<V, G, D>),
 }
 
 impl<V, D, G> Activity<V, D, G>
@@ -2621,12 +2365,12 @@ where
                 reader,
             )?)),
             6 => Ok(Activity::ConflictingNotarize(
-                ConflictingNotarize::<V, D>::read(reader)?,
+                ConflictingNotarize::<V, G, D>::read(reader)?,
             )),
             7 => Ok(Activity::ConflictingFinalize(
-                ConflictingFinalize::<V, D>::read(reader)?,
+                ConflictingFinalize::<V, G, D>::read(reader)?,
             )),
-            8 => Ok(Activity::NullifyFinalize(NullifyFinalize::<V, D>::read(
+            8 => Ok(Activity::NullifyFinalize(NullifyFinalize::<V, G, D>::read(
                 reader,
             )?)),
             _ => Err(Error::Invalid(
@@ -2746,407 +2490,374 @@ impl<V: Variant> EncodeSize for Seed<V> {
 }
 
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
-/// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ConflictingNotarize<V: Variant, D: Digest> {
-    /// The round in which the conflict occurred
-    pub round: Round,
-    /// The parent view of the first conflicting proposal
-    pub parent_1: View,
-    /// The payload of the first conflicting proposal
-    pub payload_1: D,
-    /// The signature on the first conflicting proposal
-    pub signature_1: PartialSignature<V>,
-    /// The parent view of the second conflicting proposal
-    pub parent_2: View,
-    /// The payload of the second conflicting proposal
-    pub payload_2: D,
-    /// The signature on the second conflicting proposal
-    pub signature_2: PartialSignature<V>,
+///
+/// If a validator signs two different proposals for the same view, we can recreate the
+/// proposals from their signatures and prove Byzantine behavior.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictingNotarize<V: Variant, G: SigningScheme, D: Digest> {
+    pub first: signing::Notarize<G, D>,
+    pub second: signing::Notarize<G, D>,
+    _marker: PhantomData<V>,
 }
 
-impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
+impl<V: Variant, G: SigningScheme, D: Digest> ConflictingNotarize<V, G, D> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
-    pub fn new(notarize_1: Notarize<V, D>, notarize_2: Notarize<V, D>) -> Self {
-        assert_eq!(notarize_1.view(), notarize_2.view());
-        assert_eq!(notarize_1.signer(), notarize_2.signer());
-        ConflictingNotarize {
-            round: notarize_1.proposal.round,
-            parent_1: notarize_1.proposal.parent,
-            payload_1: notarize_1.proposal.payload,
-            signature_1: notarize_1.proposal_signature,
-            parent_2: notarize_2.proposal.parent,
-            payload_2: notarize_2.proposal.payload,
-            signature_2: notarize_2.proposal_signature,
-        }
+    pub fn new(first: signing::Notarize<G, D>, second: signing::Notarize<G, D>) -> Self {
+        assert_eq!(first.view(), second.view());
+        assert_eq!(first.signer(), second.signer());
+        Self { first, second, _marker: PhantomData }
     }
 
-    /// Reconstructs the original proposals from this evidence.
-    pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
-        (
-            Proposal::new(self.round, self.parent_1, self.payload_1),
-            Proposal::new(self.round, self.parent_2, self.payload_2),
-        )
+    /// Returns both notarize messages contained in this evidence.
+    pub fn notarizes(&self) -> (&signing::Notarize<G, D>, &signing::Notarize<G, D>) {
+        (&self.first, &self.second)
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
-        let (proposal_1, proposal_2) = self.proposals();
-        let notarize_namespace = notarize_namespace(namespace);
-        let notarize_message_1 = proposal_1.encode();
-        let notarize_message_1 = (
-            Some(notarize_namespace.as_ref()),
-            notarize_message_1.as_ref(),
-        );
-        let notarize_message_2 = proposal_2.encode();
-        let notarize_message_2 = (
-            Some(notarize_namespace.as_ref()),
-            notarize_message_2.as_ref(),
-        );
-        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+    pub fn verify(&self, scheme: &G, namespace: &[u8]) -> bool
+    where
+        G::SignerId: Clone,
+    {
+        if self.first.view() != self.second.view() || self.first.signer() != self.second.signer() {
             return false;
-        };
-        let signature =
-            aggregate_signatures::<V, _>(&[self.signature_1.value, self.signature_2.value]);
-        aggregate_verify_multiple_messages::<V, _>(
-            evaluated,
-            &[notarize_message_1, notarize_message_2],
-            &signature,
-            1,
-        )
-        .is_ok()
+        }
+
+        self.first.verify(scheme, namespace).is_ok()
+            && self.second.verify(scheme, namespace).is_ok()
     }
 }
 
-impl<V: Variant, D: Digest> Attributable for ConflictingNotarize<V, D> {
+impl<V, G, D> Attributable for ConflictingNotarize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme<SignerId = u32>,
+    D: Digest,
+{
     fn signer(&self) -> u32 {
-        self.signature_1.index
+        self.first.signer()
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for ConflictingNotarize<V, D> {
+impl<V, G, D> Epochable for ConflictingNotarize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
-        self.round.epoch()
+        self.first.proposal.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for ConflictingNotarize<V, D> {
+impl<V, G, D> Viewable for ConflictingNotarize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type View = View;
 
     fn view(&self) -> View {
-        self.round.view()
+        self.first.view()
     }
 }
 
-impl<V: Variant, D: Digest> Write for ConflictingNotarize<V, D> {
+impl<V, G, D> Write for ConflictingNotarize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        UInt(self.parent_1).write(writer);
-        self.payload_1.write(writer);
-        self.signature_1.write(writer);
-        UInt(self.parent_2).write(writer);
-        self.payload_2.write(writer);
-        self.signature_2.write(writer);
+        self.first.write(writer);
+        self.second.write(writer);
     }
 }
 
-impl<V: Variant, D: Digest> Read for ConflictingNotarize<V, D> {
+impl<V, G, D> Read for ConflictingNotarize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let parent_1 = UInt::read(reader)?.into();
-        let payload_1 = D::read(reader)?;
-        let signature_1 = PartialSignature::<V>::read(reader)?;
-        let parent_2 = UInt::read(reader)?.into();
-        let payload_2 = D::read(reader)?;
-        let signature_2 = PartialSignature::<V>::read(reader)?;
-        if signature_1.index != signature_2.index {
+        let first = signing::Notarize::<G, D>::read(reader)?;
+        let second = signing::Notarize::<G, D>::read(reader)?;
+        if first.signer() != second.signer() {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::ConflictingNotarize",
-                "mismatched signatures",
+                "mismatched signers",
             ));
         }
-        Ok(ConflictingNotarize {
-            round,
-            parent_1,
-            payload_1,
-            signature_1,
-            parent_2,
-            payload_2,
-            signature_2,
-        })
-    }
-}
-
-impl<V: Variant, D: Digest> EncodeSize for ConflictingNotarize<V, D> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size()
-            + UInt(self.parent_1).encode_size()
-            + self.payload_1.encode_size()
-            + self.signature_1.encode_size()
-            + UInt(self.parent_2).encode_size()
-            + self.payload_2.encode_size()
-            + self.signature_2.encode_size()
-    }
-}
-
-/// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
-/// Similar to ConflictingNotarize, but for finalizes.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ConflictingFinalize<V: Variant, D: Digest> {
-    /// The round in which the conflict occurred
-    pub round: Round,
-    /// The parent view of the first conflicting proposal
-    pub parent_1: View,
-    /// The payload of the first conflicting proposal
-    pub payload_1: D,
-    /// The signature on the first conflicting proposal
-    pub signature_1: PartialSignature<V>,
-    /// The parent view of the second conflicting proposal
-    pub parent_2: View,
-    /// The payload of the second conflicting proposal
-    pub payload_2: D,
-    /// The signature on the second conflicting proposal
-    pub signature_2: PartialSignature<V>,
-}
-
-impl<V: Variant, D: Digest> ConflictingFinalize<V, D> {
-    /// Creates a new conflicting finalize evidence from two conflicting finalizes.
-    pub fn new(finalize_1: Finalize<V, D>, finalize_2: Finalize<V, D>) -> Self {
-        assert_eq!(finalize_1.view(), finalize_2.view());
-        assert_eq!(finalize_1.signer(), finalize_2.signer());
-        ConflictingFinalize {
-            round: finalize_1.proposal.round,
-            parent_1: finalize_1.proposal.parent,
-            payload_1: finalize_1.proposal.payload,
-            signature_1: finalize_1.proposal_signature,
-            parent_2: finalize_2.proposal.parent,
-            payload_2: finalize_2.proposal.payload,
-            signature_2: finalize_2.proposal_signature,
+        if first.view() != second.view() {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::ConflictingNotarize",
+                "mismatched views",
+            ));
         }
+        Ok(Self { first, second, _marker: PhantomData })
+    }
+}
+
+impl<V, G, D> EncodeSize for ConflictingNotarize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.first.encode_size() + self.second.encode_size()
+    }
+}
+
+/// Similar to ConflictingNotarize, but for finalizes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictingFinalize<V: Variant, G: SigningScheme, D: Digest> {
+    pub first: signing::Finalize<G, D>,
+    pub second: signing::Finalize<G, D>,
+    _marker: PhantomData<V>,
+}
+
+impl<V: Variant, G: SigningScheme, D: Digest> ConflictingFinalize<V, G, D> {
+    /// Creates new conflicting finalize evidence from two conflicting finalizes.
+    pub fn new(first: signing::Finalize<G, D>, second: signing::Finalize<G, D>) -> Self {
+        assert_eq!(first.view(), second.view());
+        assert_eq!(first.signer(), second.signer());
+        Self { first, second, _marker: PhantomData }
     }
 
-    /// Reconstructs the original proposals from this evidence.
-    pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
-        (
-            Proposal::new(self.round, self.parent_1, self.payload_1),
-            Proposal::new(self.round, self.parent_2, self.payload_2),
-        )
+    /// Returns both finalize messages contained in this evidence.
+    pub fn finalizes(&self) -> (&signing::Finalize<G, D>, &signing::Finalize<G, D>) {
+        (&self.first, &self.second)
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
-        let (proposal_1, proposal_2) = self.proposals();
-        let finalize_namespace = finalize_namespace(namespace);
-        let finalize_message_1 = proposal_1.encode();
-        let finalize_message_1 = (
-            Some(finalize_namespace.as_ref()),
-            finalize_message_1.as_ref(),
-        );
-        let finalize_message_2 = proposal_2.encode();
-        let finalize_message_2 = (
-            Some(finalize_namespace.as_ref()),
-            finalize_message_2.as_ref(),
-        );
-        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+    pub fn verify(&self, scheme: &G, namespace: &[u8]) -> bool
+    where
+        G::SignerId: Clone,
+    {
+        if self.first.view() != self.second.view() || self.first.signer() != self.second.signer() {
             return false;
-        };
-        let signature =
-            aggregate_signatures::<V, _>(&[self.signature_1.value, self.signature_2.value]);
-        aggregate_verify_multiple_messages::<V, _>(
-            evaluated,
-            &[finalize_message_1, finalize_message_2],
-            &signature,
-            1,
-        )
-        .is_ok()
+        }
+
+        self.first.verify(scheme, namespace).is_ok()
+            && self.second.verify(scheme, namespace).is_ok()
     }
 }
 
-impl<V: Variant, D: Digest> Attributable for ConflictingFinalize<V, D> {
+impl<V, G, D> Attributable for ConflictingFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme<SignerId = u32>,
+    D: Digest,
+{
     fn signer(&self) -> u32 {
-        self.signature_1.index
+        self.first.signer()
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for ConflictingFinalize<V, D> {
+impl<V, G, D> Epochable for ConflictingFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
-        self.round.epoch()
+        self.first.proposal.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for ConflictingFinalize<V, D> {
+impl<V, G, D> Viewable for ConflictingFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type View = View;
 
     fn view(&self) -> View {
-        self.round.view()
+        self.first.view()
     }
 }
 
-impl<V: Variant, D: Digest> Write for ConflictingFinalize<V, D> {
+impl<V, G, D> Write for ConflictingFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        UInt(self.parent_1).write(writer);
-        self.payload_1.write(writer);
-        self.signature_1.write(writer);
-        UInt(self.parent_2).write(writer);
-        self.payload_2.write(writer);
-        self.signature_2.write(writer);
+        self.first.write(writer);
+        self.second.write(writer);
     }
 }
 
-impl<V: Variant, D: Digest> Read for ConflictingFinalize<V, D> {
+impl<V, G, D> Read for ConflictingFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let parent_1 = UInt::read(reader)?.into();
-        let payload_1 = D::read(reader)?;
-        let signature_1 = PartialSignature::<V>::read(reader)?;
-        let parent_2 = UInt::read(reader)?.into();
-        let payload_2 = D::read(reader)?;
-        let signature_2 = PartialSignature::<V>::read(reader)?;
-        if signature_1.index != signature_2.index {
+        let first = signing::Finalize::<G, D>::read(reader)?;
+        let second = signing::Finalize::<G, D>::read(reader)?;
+        if first.signer() != second.signer() {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::ConflictingFinalize",
-                "mismatched signatures",
+                "mismatched signers",
             ));
         }
-        Ok(ConflictingFinalize {
-            round,
-            parent_1,
-            payload_1,
-            signature_1,
-            parent_2,
-            payload_2,
-            signature_2,
-        })
+        if first.view() != second.view() {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::ConflictingFinalize",
+                "mismatched views",
+            ));
+        }
+        Ok(Self { first, second, _marker: PhantomData })
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for ConflictingFinalize<V, D> {
+impl<V, G, D> EncodeSize for ConflictingFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     fn encode_size(&self) -> usize {
-        self.round.encode_size()
-            + UInt(self.parent_1).encode_size()
-            + self.payload_1.encode_size()
-            + self.signature_1.encode_size()
-            + UInt(self.parent_2).encode_size()
-            + self.payload_2.encode_size()
-            + self.signature_2.encode_size()
+        self.first.encode_size() + self.second.encode_size()
     }
 }
 
 /// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NullifyFinalize<V: Variant, D: Digest> {
-    /// The proposal that the validator tried to finalize
-    pub proposal: Proposal<D>,
-    /// The signature on the nullify
-    pub view_signature: PartialSignature<V>,
-    /// The signature on the finalize
-    pub finalize_signature: PartialSignature<V>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NullifyFinalize<V: Variant, G: SigningScheme, D: Digest> {
+    pub nullify: signing::Nullify<G>,
+    pub finalize: signing::Finalize<G, D>,
+    _marker: PhantomData<V>,
 }
 
-impl<V: Variant, D: Digest> NullifyFinalize<V, D> {
+impl<V: Variant, G: SigningScheme, D: Digest> NullifyFinalize<V, G, D> {
     /// Creates a new nullify-finalize evidence from a nullify and a finalize.
-    pub fn new(nullify: Nullify<V>, finalize: Finalize<V, D>) -> Self {
-        assert_eq!(nullify.view(), finalize.view());
+    pub fn new(nullify: signing::Nullify<G>, finalize: signing::Finalize<G, D>) -> Self {
+        assert_eq!(nullify.round().view(), finalize.view());
         assert_eq!(nullify.signer(), finalize.signer());
-        NullifyFinalize {
-            proposal: finalize.proposal,
-            view_signature: nullify.view_signature,
-            finalize_signature: finalize.proposal_signature,
-        }
+        Self { nullify, finalize, _marker: PhantomData }
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
-        let nullify_namespace = nullify_namespace(namespace);
-        let nullify_message = self.proposal.round.encode();
-        let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
-        let finalize_namespace = finalize_namespace(namespace);
-        let finalize_message = self.proposal.encode();
-        let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
-        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+    pub fn verify(&self, scheme: &G, namespace: &[u8]) -> bool
+    where
+        G::SignerId: Clone,
+    {
+        if self.nullify.round().view() != self.finalize.view()
+            || self.nullify.signer() != self.finalize.signer()
+        {
             return false;
-        };
-        let signature = aggregate_signatures::<V, _>(&[
-            self.view_signature.value,
-            self.finalize_signature.value,
-        ]);
-        aggregate_verify_multiple_messages::<V, _>(
-            evaluated,
-            &[nullify_message, finalize_message],
-            &signature,
-            1,
-        )
-        .is_ok()
+        }
+
+        self.nullify.verify::<D>(scheme, namespace).is_ok()
+            && self.finalize.verify(scheme, namespace).is_ok()
+    }
+
+    pub fn round(&self) -> Round {
+        self.finalize.round()
     }
 }
 
-impl<V: Variant, D: Digest> Attributable for NullifyFinalize<V, D> {
+impl<V, G, D> Attributable for NullifyFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme<SignerId = u32>,
+    D: Digest,
+{
     fn signer(&self) -> u32 {
-        self.view_signature.index
+        self.nullify.signer()
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for NullifyFinalize<V, D> {
+impl<V, G, D> Epochable for NullifyFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
-        self.proposal.epoch()
+        self.finalize.proposal.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for NullifyFinalize<V, D> {
+impl<V, G, D> Viewable for NullifyFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type View = View;
 
     fn view(&self) -> View {
-        self.proposal.view()
+        self.finalize.view()
     }
 }
 
-impl<V: Variant, D: Digest> Write for NullifyFinalize<V, D> {
+impl<V, G, D> Write for NullifyFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
-        self.view_signature.write(writer);
-        self.finalize_signature.write(writer);
+        self.nullify.write(writer);
+        self.finalize.write(writer);
     }
 }
 
-impl<V: Variant, D: Digest> Read for NullifyFinalize<V, D> {
+impl<V, G, D> Read for NullifyFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
-        let view_signature = PartialSignature::<V>::read(reader)?;
-        let finalize_signature = PartialSignature::<V>::read(reader)?;
-        if view_signature.index != finalize_signature.index {
+        let nullify = signing::Nullify::<G>::read(reader)?;
+        let finalize = signing::Finalize::<G, D>::read(reader)?;
+        if nullify.signer() != finalize.signer() {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::NullifyFinalize",
-                "mismatched signatures",
+                "mismatched signers",
             ));
         }
-        Ok(NullifyFinalize {
-            proposal,
-            view_signature,
-            finalize_signature,
-        })
+        if nullify.round().view() != finalize.view() {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::NullifyFinalize",
+                "mismatched views",
+            ));
+        }
+        Ok(Self { nullify, finalize, _marker: PhantomData })
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for NullifyFinalize<V, D> {
+impl<V, G, D> EncodeSize for NullifyFinalize<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme,
+    D: Digest,
+{
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size()
-            + self.view_signature.encode_size()
-            + self.finalize_signature.encode_size()
+        self.nullify.encode_size() + self.finalize.encode_size()
     }
 }
 
@@ -3490,101 +3201,107 @@ mod tests {
     fn test_conflicting_notarize_encode_decode() {
         let n = 5;
         let t = quorum(n);
-        let (_, polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
 
-        let notarize1 = Notarize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarize(&shares[0], Round::new(0, 10), 5, 1),
-        );
-        let notarize2 = Notarize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarize(&shares[0], Round::new(0, 10), 5, 2),
-        );
-        let conflicting_notarize = ConflictingNotarize::new(notarize1, notarize2);
+        let notarize1 = create_signing_notarize(&shares[0], Round::new(0, 10), 5, 1);
+        let notarize2 = create_signing_notarize(&shares[0], Round::new(0, 10), 5, 2);
+        let conflicting_notarize: ConflictingNotarize<
+            MinSig,
+            BlsThresholdScheme<MinSig>,
+            Sha256,
+        > = ConflictingNotarize::new(notarize1.clone(), notarize2.clone());
 
         let encoded = conflicting_notarize.encode();
-        let decoded = ConflictingNotarize::<MinSig, Sha256>::decode(encoded).unwrap();
+        let decoded =
+            ConflictingNotarize::<MinSig, BlsThresholdScheme<MinSig>, Sha256>::decode(encoded).unwrap();
 
-        assert_eq!(conflicting_notarize, decoded);
-        assert!(decoded.verify(NAMESPACE, &polynomial));
+        assert_eq!(conflicting_notarize.encode(), decoded.encode());
+        assert!(decoded.verify(&scheme, NAMESPACE));
     }
 
     #[test]
     fn test_conflicting_finalize_encode_decode() {
         let n = 5;
         let t = quorum(n);
-        let (_, polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
 
-        let finalize1 = Finalize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_finalize(&shares[0], Round::new(0, 10), 5, 1),
-        );
-        let finalize2 = Finalize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_finalize(&shares[0], Round::new(0, 10), 5, 2),
-        );
-        let conflicting_finalize = ConflictingFinalize::new(finalize1, finalize2);
+        let finalize1 = create_signing_finalize(&shares[0], Round::new(0, 10), 5, 1);
+        let finalize2 = create_signing_finalize(&shares[0], Round::new(0, 10), 5, 2);
+        let conflicting_finalize: ConflictingFinalize<
+            MinSig,
+            BlsThresholdScheme<MinSig>,
+            Sha256,
+        > = ConflictingFinalize::new(finalize1.clone(), finalize2.clone());
 
         let encoded = conflicting_finalize.encode();
-        let decoded = ConflictingFinalize::<MinSig, Sha256>::decode(encoded).unwrap();
+        let decoded =
+            ConflictingFinalize::<MinSig, BlsThresholdScheme<MinSig>, Sha256>::decode(encoded).unwrap();
 
-        assert_eq!(conflicting_finalize, decoded);
-        assert!(decoded.verify(NAMESPACE, &polynomial));
+        assert_eq!(conflicting_finalize.encode(), decoded.encode());
+        assert!(decoded.verify(&scheme, NAMESPACE));
     }
 
     #[test]
     fn test_nullify_finalize_encode_decode() {
         let n = 5;
         let t = quorum(n);
-        let (_, polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
         let round = Round::new(0, 10);
 
-        let nullify = Nullify::<MinSig>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_nullify(&shares[0], round),
-        );
-        let finalize = Finalize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_finalize(&shares[0], round, 5, 1),
-        );
-        let nullify_finalize = NullifyFinalize::new(nullify, finalize);
+        let nullify = create_signing_nullify(&shares[0], round);
+        let finalize = create_signing_finalize(&shares[0], round, 5, 1);
+        let nullify_finalize: NullifyFinalize<
+            MinSig,
+            BlsThresholdScheme<MinSig>,
+            Sha256,
+        > = NullifyFinalize::new(nullify.clone(), finalize.clone());
 
         let encoded = nullify_finalize.encode();
-        let decoded = NullifyFinalize::<MinSig, Sha256>::decode(encoded).unwrap();
+        let decoded =
+            NullifyFinalize::<MinSig, BlsThresholdScheme<MinSig>, Sha256>::decode(encoded).unwrap();
 
-        assert_eq!(nullify_finalize, decoded);
-        assert!(decoded.verify(NAMESPACE, &polynomial));
+        assert_eq!(nullify_finalize.encode(), decoded.encode());
+        assert!(decoded.verify(&scheme, NAMESPACE));
     }
 
     #[test]
     fn test_notarize_verify_wrong_namespace() {
         let n = 5;
         let t = quorum(n);
-        let (_, polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
 
-        let notarize = Notarize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarize(&shares[0], Round::new(0, 10), 5, 1),
-        );
+        let notarize = create_signing_notarize(&shares[0], Round::new(0, 10), 5, 1);
 
-        // Verify with correct namespace and polynomial - should pass
-        assert!(notarize.verify(NAMESPACE, &polynomial));
+        // Verify with correct namespace - should pass
+        assert!(notarize.verify(&scheme, NAMESPACE).is_ok());
 
         // Verify with wrong namespace - should fail
-        assert!(!notarize.verify(b"wrong_namespace", &polynomial));
+        assert!(notarize.verify(&scheme, b"wrong_namespace").is_err());
     }
 
     #[test]
     fn test_notarize_verify_wrong_polynomial() {
         let n = 5;
         let t = quorum(n);
-        let (_, polynomial1, shares1) = generate_test_data(n, t, 0);
+        let (identity1, polynomial1, shares1) = generate_test_data(n, t, 0);
 
         // Generate a different set of BLS keys/shares
-        let (_, polynomial2, _) = generate_test_data(n, t, 1);
+        let (identity2, polynomial2, _) = generate_test_data(n, t, 1);
 
-        let notarize = Notarize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarize(&shares1[0], Round::new(0, 10), 5, 1),
-        );
+        let scheme_correct = make_scheme(&identity1, &polynomial1, &shares1[0], t);
+        let scheme_wrong = make_scheme(&identity2, &polynomial2, &shares1[0], t);
 
-        // Verify with correct polynomial - should pass
-        assert!(notarize.verify(NAMESPACE, &polynomial1));
+        let notarize = create_signing_notarize(&shares1[0], Round::new(0, 10), 5, 1);
 
-        // Verify with wrong polynomial - should fail
-        assert!(!notarize.verify(NAMESPACE, &polynomial2));
+        // Verify with correct scheme - should pass
+        assert!(notarize.verify(&scheme_correct, NAMESPACE).is_ok());
+
+        // Verify with wrong scheme - should fail
+        assert!(notarize.verify(&scheme_wrong, NAMESPACE).is_err());
     }
 
     #[test]
@@ -3594,18 +3311,18 @@ mod tests {
         let (identity, polynomial, shares) = generate_test_data(n, t, 0);
         let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
 
-        let notarization = Notarization::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarization(Round::new(0, 10), 5, 1, &shares[..t as usize], &scheme),
-        );
+        let notarization =
+            create_signing_notarization(Round::new(0, 10), 5, 1, &shares[..t as usize], &scheme);
 
-        // Verify with correct public key - should pass
-        assert!(notarization.verify(NAMESPACE, &identity));
+        // Verify with correct scheme - should pass
+        assert!(notarization.verify(&scheme, NAMESPACE).is_ok());
 
         // Generate a different set of BLS keys/shares
-        let (wrong_identity, _, _) = generate_test_data(n, t, 1);
+        let (wrong_identity, wrong_polynomial, _) = generate_test_data(n, t, 1);
+        let wrong_scheme = make_scheme(&wrong_identity, &wrong_polynomial, &shares[0], t);
 
-        // Verify with wrong public key - should fail
-        assert!(!notarization.verify(NAMESPACE, &wrong_identity));
+        // Verify with wrong scheme - should fail
+        assert!(notarization.verify(&wrong_scheme, NAMESPACE).is_err());
     }
 
     #[test]
@@ -3615,15 +3332,14 @@ mod tests {
         let (identity, polynomial, shares) = generate_test_data(n, t, 0);
         let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
 
-        let notarization = Notarization::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarization(Round::new(0, 10), 5, 1, &shares[..t as usize], &scheme),
-        );
+        let notarization =
+            create_signing_notarization(Round::new(0, 10), 5, 1, &shares[..t as usize], &scheme);
 
         // Verify with correct namespace - should pass
-        assert!(notarization.verify(NAMESPACE, &identity));
+        assert!(notarization.verify(&scheme, NAMESPACE).is_ok());
 
         // Verify with wrong namespace - should fail
-        assert!(!notarization.verify(b"wrong_namespace", &identity));
+        assert!(notarization.verify(&scheme, b"wrong_namespace").is_err());
     }
 
     #[test]
@@ -3657,84 +3373,72 @@ mod tests {
     fn test_conflicting_notarize_detection() {
         let n = 5;
         let t = quorum(n);
-        let (_, polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
 
         // Create two different proposals for the same view
         let round = Round::new(0, 10);
-        let notarize1 = Notarize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarize(&shares[0], round, 5, 1),
-        );
-        let notarize2 = Notarize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarize(&shares[0], round, 5, 2),
-        );
+        let notarize1 = create_signing_notarize(&shares[0], round, 5, 1);
+        let notarize2 = create_signing_notarize(&shares[0], round, 5, 2);
 
         // Create conflict evidence
-        let conflict = ConflictingNotarize::new(notarize1, notarize2.clone());
+        let conflict: ConflictingNotarize<MinSig, BlsThresholdScheme<MinSig>, Sha256> =
+            ConflictingNotarize::new(notarize1.clone(), notarize2.clone());
 
         // Verify the evidence is valid
-        assert!(conflict.verify(NAMESPACE, &polynomial));
+        assert!(conflict.verify(&scheme, NAMESPACE));
 
         // Now create invalid evidence using different validator keys
-        let notarize3 = Notarize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_notarize(&shares[1], round, 5, 1),
-        );
+        let notarize3 = create_signing_notarize(&shares[1], round, 5, 1);
 
         // This should compile but verification should fail because the signatures
         // are from different validators
-        let invalid_conflict: ConflictingNotarize<MinSig, Sha256> = ConflictingNotarize {
-            round: conflict.round,
-            parent_1: conflict.parent_1,
-            payload_1: conflict.payload_1,
-            signature_1: conflict.signature_1.clone(),
-            parent_2: notarize3.proposal.parent,
-            payload_2: notarize3.proposal.payload,
-            signature_2: notarize3.proposal_signature,
+        let invalid_conflict = ConflictingNotarize {
+            first: notarize1,
+            second: notarize3,
+            _marker: PhantomData::<MinSig>,
         };
 
         // Verification should still fail even with correct polynomial
-        assert!(!invalid_conflict.verify(NAMESPACE, &polynomial));
+        assert!(!invalid_conflict.verify(&scheme, NAMESPACE));
     }
 
     #[test]
     fn test_nullify_finalize_detection() {
         let n = 5;
         let t = quorum(n);
-        let (_, polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
 
         let round = Round::new(0, 10);
 
         // Create a nullify for view 10
-        let nullify = Nullify::<MinSig>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_nullify(&shares[0], round),
-        );
+        let nullify = create_signing_nullify(&shares[0], round);
 
-        let finalize = Finalize::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_finalize(&shares[0], round, 5, 1),
-        );
+        let finalize = create_signing_finalize(&shares[0], round, 5, 1);
 
         // Create nullify+finalize evidence
-        let conflict = NullifyFinalize::new(nullify, finalize.clone());
+        let conflict: NullifyFinalize<MinSig, BlsThresholdScheme<MinSig>, Sha256> =
+            NullifyFinalize::new(nullify.clone(), finalize.clone());
 
         // Verify the evidence is valid
-        assert!(conflict.verify(NAMESPACE, &polynomial));
+        assert!(conflict.verify(&scheme, NAMESPACE));
 
         // Now try with wrong namespace
-        assert!(!conflict.verify(b"wrong_namespace", &polynomial));
+        assert!(!conflict.verify(&scheme, b"wrong_namespace"));
 
         // Now create invalid evidence with different validators
-        let nullify2 = Nullify::<MinSig>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_nullify(&shares[1], round),
-        );
+        let nullify2 = create_signing_nullify(&shares[1], round);
 
         // Compile but verification should fail because signatures are from different validators
-        let invalid_conflict: NullifyFinalize<MinSig, Sha256> = NullifyFinalize {
-            proposal: finalize.proposal.clone(),
-            view_signature: conflict.view_signature.clone(),
-            finalize_signature: nullify2.view_signature,
+        let invalid_conflict = NullifyFinalize {
+            nullify: nullify2,
+            finalize,
+            _marker: PhantomData::<MinSig>,
         };
 
         // Verification should fail
-        assert!(!invalid_conflict.verify(NAMESPACE, &polynomial));
+        assert!(!invalid_conflict.verify(&scheme, NAMESPACE));
     }
 
     #[test]
@@ -3744,17 +3448,17 @@ mod tests {
         let (identity, polynomial, shares) = generate_test_data(n, t, 0);
         let scheme = make_scheme(&identity, &polynomial, &shares[0], t);
 
-        let finalization = Finalization::<MinSig, Sha256>::from_signing::<BlsThresholdScheme<MinSig>>(
-            create_signing_finalization(Round::new(0, 10), 5, 1, &shares[..t as usize], &scheme),
-        );
+        let finalization =
+            create_signing_finalization(Round::new(0, 10), 5, 1, &shares[..t as usize], &scheme);
 
-        let (wrong_identity, _, _) = generate_test_data(n, t, 1);
+        let (wrong_identity, wrong_polynomial, _) = generate_test_data(n, t, 1);
+        let wrong_scheme = make_scheme(&wrong_identity, &wrong_polynomial, &shares[0], t);
 
-        // Verify with correct public key - should pass
-        assert!(finalization.verify(NAMESPACE, &identity));
+        // Verify with correct scheme - should pass
+        assert!(finalization.verify(&scheme, NAMESPACE).is_ok());
 
-        // Verify with wrong public key - should fail
-        assert!(!finalization.verify(NAMESPACE, &wrong_identity));
+        // Verify with wrong scheme - should fail
+        assert!(finalization.verify(&wrong_scheme, NAMESPACE).is_err());
     }
 
     // Helper to create a Notarize message

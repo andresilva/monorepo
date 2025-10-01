@@ -109,7 +109,8 @@ mod tests {
                 NConfig {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                },
+                
+            },
             );
             network.start();
 
@@ -153,6 +154,7 @@ mod tests {
                 participant: validator.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+            
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -184,6 +186,7 @@ mod tests {
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -437,7 +440,8 @@ mod tests {
                 NConfig {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                },
+                
+            },
             );
             network.start();
 
@@ -480,6 +484,7 @@ mod tests {
                 participant: validator.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+            
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
@@ -509,6 +514,7 @@ mod tests {
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            
             };
             let (actor, _mailbox) = Actor::new(context.clone(), voter_config);
 
@@ -831,7 +837,8 @@ mod tests {
                 NConfig {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                },
+                
+            },
             );
             network.start();
 
@@ -874,6 +881,7 @@ mod tests {
                 participant: validators[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+            
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -905,6 +913,7 @@ mod tests {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -1003,8 +1012,9 @@ mod tests {
             let recorded = finalizations
                 .get(&view)
                 .expect("missing recorded finalization");
-            assert_eq!(recorded.proposal_signature, expected_proposal_signature);
-            assert_eq!(recorded.seed_signature, expected_seed_signature);
+            let (recorded_proposal_signature, recorded_seed_signature) = &recorded.certificate;
+            assert_eq!(recorded_proposal_signature, &expected_proposal_signature);
+            assert_eq!(recorded_seed_signature, &expected_seed_signature);
         });
     }
 }

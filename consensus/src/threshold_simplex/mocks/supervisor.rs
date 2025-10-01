@@ -3,17 +3,13 @@
 
 use crate::{
     threshold_simplex::{
-        signing::SigningScheme,
-        types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed,
-            Seedable,
-        },
+        signing::{self, BlsThresholdScheme, SigningScheme},
+        types::{Activity, Attributable},
     },
     types::View,
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu, Viewable,
 };
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::{
         dkg::ops::evaluate_all,
@@ -25,7 +21,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::modulo;
+use commonware_utils::{modulo, quorum};
 use futures::channel::mpsc::{Receiver, Sender};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -54,7 +50,8 @@ where
         SignerId = u32,
         Signature = (V::Signature, V::Signature),
         Certificate = (V::Signature, V::Signature),
-    >,
+    > + From<BlsThresholdScheme<V>>,
+    G::Randomness: Clone + PartialEq + Send,
 {
     identity: V::Public,
     participants: BTreeMap<View, ViewInfo<P, V::Public>>,
@@ -62,13 +59,13 @@ where
     namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
-    pub seeds: Arc<Mutex<HashMap<View, Seed<V>>>>,
+    pub seeds: Arc<Mutex<HashMap<View, G::Randomness>>>,
     pub notarizes: Arc<Mutex<Participation<P, D>>>,
-    pub notarizations: Arc<Mutex<HashMap<View, Notarization<V, D>>>>,
+    pub notarizations: Arc<Mutex<HashMap<View, signing::Notarization<G, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
-    pub nullifications: Arc<Mutex<HashMap<View, Nullification<V>>>>,
+    pub nullifications: Arc<Mutex<HashMap<View, signing::Nullification<G>>>>,
     pub finalizes: Arc<Mutex<Participation<P, D>>>,
-    pub finalizations: Arc<Mutex<HashMap<View, Finalization<V, D>>>>,
+    pub finalizations: Arc<Mutex<HashMap<View, signing::Finalization<G, D>>>>,
     pub faults: Arc<Mutex<Faults<P, V, D, G>>>,
     pub invalid: Arc<Mutex<usize>>,
 
@@ -85,7 +82,8 @@ where
         SignerId = u32,
         Signature = (V::Signature, V::Signature),
         Certificate = (V::Signature, V::Signature),
-    >,
+    > + From<BlsThresholdScheme<V>>,
+    G::Randomness: Clone + PartialEq + Send,
 {
     pub fn new(cfg: Config<P, V>) -> Self {
         let mut identity = None;
@@ -120,6 +118,30 @@ where
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
+
+    fn participant_data(&self, view: View) -> (&Vec<V::Public>, &Vec<P>, Option<group::Share>) {
+        match self.participants.range(..=view).next_back() {
+            Some((_, (evaluations, _, validators, share))) => {
+                (evaluations, validators, share.clone())
+            }
+            None => panic!("no participants in required range"),
+        }
+    }
+
+    fn build_scheme(
+        &self,
+        evaluations: &Vec<V::Public>,
+        share: group::Share,
+        validator_count: usize,
+    ) -> G {
+        let threshold = quorum(validator_count as u32) as usize;
+        G::from(BlsThresholdScheme::<V>::new(
+            evaluations.clone(),
+            self.identity.clone(),
+            share,
+            threshold,
+        ))
+    }
 }
 
 impl<P, V, D, G> Su for Supervisor<P, V, D, G>
@@ -131,7 +153,8 @@ where
         SignerId = u32,
         Signature = (V::Signature, V::Signature),
         Certificate = (V::Signature, V::Signature),
-    >,
+    > + From<BlsThresholdScheme<V>>,
+    G::Randomness: Clone + PartialEq + Send,
 {
     type Index = View;
     type PublicKey = P;
@@ -170,7 +193,8 @@ where
         SignerId = u32,
         Signature = (V::Signature, V::Signature),
         Certificate = (V::Signature, V::Signature),
-    >,
+    > + From<BlsThresholdScheme<V>>,
+    G::Randomness: Clone + PartialEq + Send,
 {
     type Seed = V::Signature;
     type Identity = V::Public;
@@ -229,7 +253,8 @@ where
         SignerId = u32,
         Signature = (V::Signature, V::Signature),
         Certificate = (V::Signature, V::Signature),
-    >,
+    > + From<BlsThresholdScheme<V>>,
+    G::Randomness: Clone + PartialEq + Send,
 {
     type Activity = Activity<V, D, G>;
 
@@ -240,75 +265,72 @@ where
         let verified = activity.verified();
         match activity {
             Activity::Notarize(notarize) => {
-                let legacy = Notarize::<V, D>::from_signing::<G>(notarize.clone());
-                let view = legacy.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
+                let view = notarize.view();
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+                    if notarize.verify(&scheme, &self.namespace).is_err() {
+                        assert!(!verified);
+                        *self.invalid.lock().unwrap() += 1;
+                        return;
                     }
-                };
-                if !legacy.verify(&self.namespace, polynomial) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
                 }
-                let encoded = legacy.encode();
-                Notarize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[legacy.signer() as usize].clone();
+
+                let signer = notarize.signer();
+                let public_key = validators[signer as usize].clone();
                 self.notarizes
                     .lock()
                     .unwrap()
                     .entry(view)
                     .or_default()
-                    .entry(legacy.proposal.payload)
+                    .entry(notarize.proposal().payload)
                     .or_default()
                     .insert(public_key);
             }
             Activity::Notarization(notarization) => {
-                let notarization = Notarization::from_signing::<G>(notarization);
-                // Verify notarization
                 let view = notarization.view();
-                let seed = notarization.seed();
-                if !notarization.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
-                }
-                let encoded = notarization.encode();
-                Notarization::<V, D>::decode(encoded).unwrap();
-                self.notarizations
-                    .lock()
-                    .unwrap()
-                    .insert(view, notarization);
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+                    match notarization.verify(&scheme, &self.namespace) {
+                        Ok(randomness) => {
+                            self.notarizations
+                                .lock()
+                                .unwrap()
+                                .insert(view, notarization.clone());
 
-                // Verify seed
-                if !seed.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
+                            if let Some(randomness) = randomness {
+                                self.seeds.lock().unwrap().insert(view, randomness);
+                            }
+                        }
+                        Err(_) => {
+                            assert!(!verified);
+                            *self.invalid.lock().unwrap() += 1;
+                            return;
+                        }
+                    }
+                } else {
+                    self.notarizations
+                        .lock()
+                        .unwrap()
+                        .insert(view, notarization.clone());
                 }
-                let encoded = seed.encode();
-                Seed::<V>::decode(encoded).unwrap();
-                self.seeds.lock().unwrap().insert(view, seed);
             }
             Activity::Nullify(nullify) => {
-                let legacy = Nullify::<V>::from_signing::<G>(nullify.clone());
-                let view = legacy.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
+                let view = nullify.view();
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+
+                    if nullify.verify::<D>(&scheme, &self.namespace).is_err() {
+                        assert!(!verified);
+                        *self.invalid.lock().unwrap() += 1;
+                        return;
                     }
-                };
-                if !legacy.verify(&self.namespace, polynomial) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
                 }
-                let encoded = legacy.encode();
-                Nullify::<V>::decode(encoded).unwrap();
-                let public_key = validators[legacy.signer() as usize].clone();
+
+                let signer = nullify.signer();
+                let public_key = validators[signer as usize].clone();
                 self.nullifies
                     .lock()
                     .unwrap()
@@ -317,166 +339,161 @@ where
                     .insert(public_key);
             }
             Activity::Nullification(nullification) => {
-                let nullification = Nullification::from_signing::<G>(nullification);
-                // Verify nullification
                 let view = nullification.view();
-                let seed = nullification.seed();
-                if !nullification.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
-                }
-                let encoded = nullification.encode();
-                Nullification::<V>::decode(encoded).unwrap();
-                self.nullifications
-                    .lock()
-                    .unwrap()
-                    .insert(view, nullification);
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+                    match nullification.verify::<D>(&scheme, &self.namespace) {
+                        Ok(randomness) => {
+                            self.nullifications
+                                .lock()
+                                .unwrap()
+                                .insert(view, nullification.clone());
 
-                // Verify seed
-                if !seed.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
+                            if let Some(randomness) = randomness {
+                                self.seeds.lock().unwrap().insert(view, randomness);
+                            }
+                        }
+                        Err(_) => {
+                            assert!(!verified);
+                            *self.invalid.lock().unwrap() += 1;
+                            return;
+                        }
+                    }
+                } else {
+                    self.nullifications
+                        .lock()
+                        .unwrap()
+                        .insert(view, nullification.clone());
                 }
-                let encoded = seed.encode();
-                Seed::<V>::decode(encoded).unwrap();
-                self.seeds.lock().unwrap().insert(view, seed);
             }
             Activity::Finalize(finalize) => {
-                let legacy = Finalize::<V, D>::from_signing::<G>(finalize.clone());
-                let view = legacy.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
+                let view = finalize.view();
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+
+                    if finalize.verify(&scheme, &self.namespace).is_err() {
+                        assert!(!verified);
+                        *self.invalid.lock().unwrap() += 1;
+                        return;
                     }
-                };
-                if !legacy.verify(&self.namespace, polynomial) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
                 }
-                let encoded = legacy.encode();
-                Finalize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[legacy.signer() as usize].clone();
+
+                let signer = finalize.signer();
+                let public_key = validators[signer as usize].clone();
                 self.finalizes
                     .lock()
                     .unwrap()
                     .entry(view)
                     .or_default()
-                    .entry(legacy.proposal.payload)
+                    .entry(finalize.proposal().payload)
                     .or_default()
                     .insert(public_key);
             }
             Activity::Finalization(finalization) => {
-                let finalization = Finalization::from_signing::<G>(finalization);
-                // Verify finalization
                 let view = finalization.view();
-                let seed = finalization.seed();
-                if !finalization.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
-                }
-                let encoded = finalization.encode();
-                Finalization::<V, D>::decode(encoded).unwrap();
-                self.finalizations
-                    .lock()
-                    .unwrap()
-                    .insert(view, finalization.clone());
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+                    match finalization.verify(&scheme, &self.namespace) {
+                        Ok(randomness) => {
+                            self.finalizations
+                                .lock()
+                                .unwrap()
+                                .insert(view, finalization.clone());
 
-                // Verify seed
-                if !seed.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
-                }
-                let encoded = seed.encode();
-                Seed::<V>::decode(encoded).unwrap();
-                self.seeds.lock().unwrap().insert(view, seed);
+                            if let Some(randomness) = randomness {
+                                self.seeds.lock().unwrap().insert(view, randomness);
+                            }
 
-                // Send message to subscribers
-                *self.latest.lock().unwrap() = finalization.view();
-                let mut subscribers = self.subscribers.lock().unwrap();
-                for subscriber in subscribers.iter_mut() {
-                    let _ = subscriber.try_send(finalization.view());
+                            *self.latest.lock().unwrap() = view;
+                            let mut subscribers = self.subscribers.lock().unwrap();
+                            for subscriber in subscribers.iter_mut() {
+                                let _ = subscriber.try_send(view);
+                            }
+                        }
+                        Err(_) => {
+                            assert!(!verified);
+                            *self.invalid.lock().unwrap() += 1;
+                            return;
+                        }
+                    }
+                } else {
+                    self.finalizations
+                        .lock()
+                        .unwrap()
+                        .insert(view, finalization.clone());
+
+                    *self.latest.lock().unwrap() = view;
+                    let mut subscribers = self.subscribers.lock().unwrap();
+                    for subscriber in subscribers.iter_mut() {
+                        let _ = subscriber.try_send(view);
+                    }
                 }
             }
             Activity::ConflictingNotarize(ref conflicting) => {
                 let view = conflicting.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+                    if !conflicting.verify(&scheme, &self.namespace) {
+                        assert!(!verified);
+                        *self.invalid.lock().unwrap() += 1;
+                        return;
                     }
-                };
-                if !conflicting.verify(&self.namespace, polynomial) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
+                    let public_key = validators[conflicting.signer() as usize].clone();
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .push(activity);
                 }
-                let encoded = conflicting.encode();
-                ConflictingNotarize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[conflicting.signer() as usize].clone();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .push(activity);
             }
             Activity::ConflictingFinalize(ref conflicting) => {
                 let view = conflicting.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+                    if !conflicting.verify(&scheme, &self.namespace) {
+                        assert!(!verified);
+                        *self.invalid.lock().unwrap() += 1;
+                        return;
                     }
-                };
-                if !conflicting.verify(&self.namespace, polynomial) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
+                    let public_key = validators[conflicting.signer() as usize].clone();
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .push(activity);
                 }
-                let encoded = conflicting.encode();
-                ConflictingFinalize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[conflicting.signer() as usize].clone();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .push(activity);
             }
             Activity::NullifyFinalize(ref nullify_finalize) => {
                 let view = nullify_finalize.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
+                let (evaluations, validators, share_opt) = self.participant_data(view);
+                if let Some(share) = share_opt {
+                    let scheme = self.build_scheme(evaluations, share, validators.len());
+                    if !nullify_finalize.verify(&scheme, &self.namespace) {
+                        assert!(!verified);
+                        *self.invalid.lock().unwrap() += 1;
+                        return;
                     }
-                };
-                if !nullify_finalize.verify(&self.namespace, polynomial) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
+                    let public_key = validators[nullify_finalize.signer() as usize].clone();
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .push(activity);
                 }
-                let encoded = nullify_finalize.encode();
-                NullifyFinalize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[nullify_finalize.signer() as usize].clone();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .push(activity);
             }
         }
     }
@@ -491,7 +508,8 @@ where
         SignerId = u32,
         Signature = (V::Signature, V::Signature),
         Certificate = (V::Signature, V::Signature),
-    >,
+    > + From<BlsThresholdScheme<V>>,
+    G::Randomness: Clone + PartialEq + Send,
 {
     type Index = View;
     async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {

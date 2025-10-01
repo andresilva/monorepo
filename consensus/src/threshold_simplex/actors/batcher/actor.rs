@@ -6,8 +6,8 @@ use crate::{
         metrics::Inbound,
         signing::{self, SigningScheme},
         types::{
-            Activity, BatchVerifier, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
-            Nullify, NullifyFinalize, Voter,
+            Activity, BatchVerifier, ConflictingFinalize, ConflictingNotarize, NullifyFinalize,
+            Voter,
         },
     },
     types::{Epoch, View},
@@ -58,7 +58,7 @@ struct Round<
 
     inbound_messages: Family<Inbound, Counter>,
 
-    _phantom: PhantomData<C>,
+    _phantom: PhantomData<(C, V)>,
 }
 
 impl<
@@ -139,16 +139,13 @@ where
 
                 match self.notarizes[index as usize].as_ref() {
                     Some(previous) => {
-                        let previous_legacy = Notarize::from_signing::<G>(previous.clone());
-                        let current_legacy = Notarize::from_signing::<G>(notarize.clone());
-                        let is_same = previous_legacy.proposal == current_legacy.proposal
-                            && previous_legacy.proposal_signature.value
-                                == current_legacy.proposal_signature.value
-                            && previous_legacy.seed_signature.value
-                                == current_legacy.seed_signature.value;
-                        if !is_same {
-                            let activity =
-                                ConflictingNotarize::new(previous_legacy, current_legacy);
+                        if previous.proposal != notarize.proposal
+                            || previous.vote.signature != notarize.vote.signature
+                        {
+                            let activity = ConflictingNotarize::new(
+                                previous.clone(),
+                                notarize.clone(),
+                            );
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
@@ -179,10 +176,7 @@ where
                 }
 
                 if let Some(previous) = self.finalizes[index as usize].as_ref() {
-                    let legacy_nullify: Nullify<V> = Nullify::from_signing::<G>(nullify.clone());
-                    let legacy_finalize: Finalize<V, D> =
-                        Finalize::from_signing::<G>(previous.clone());
-                    let activity = NullifyFinalize::new(legacy_nullify, legacy_finalize);
+                    let activity = NullifyFinalize::new(nullify.clone(), previous.clone());
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
@@ -193,16 +187,9 @@ where
 
                 match self.nullifies[index as usize].as_ref() {
                     Some(previous) => {
-                        let previous_legacy: Nullify<V> =
-                            Nullify::from_signing::<G>(previous.clone());
-                        let current_legacy: Nullify<V> =
-                            Nullify::from_signing::<G>(nullify.clone());
-                        let is_same = previous_legacy.round == current_legacy.round
-                            && previous_legacy.view_signature.value
-                                == current_legacy.view_signature.value
-                            && previous_legacy.seed_signature.value
-                                == current_legacy.seed_signature.value;
-                        if !is_same {
+                        if previous.round != nullify.round
+                            || previous.vote.signature != nullify.vote.signature
+                        {
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
@@ -231,18 +218,13 @@ where
 
                 match self.finalizes[index as usize].as_ref() {
                     Some(previous) => {
-                        let previous_legacy: Finalize<V, D> =
-                            Finalize::from_signing::<G>(previous.clone());
-                        let current_legacy: Finalize<V, D> =
-                            Finalize::from_signing::<G>(finalize.clone());
-                        let is_same = previous_legacy.proposal == current_legacy.proposal
-                            && previous_legacy.proposal_signature.value
-                                == current_legacy.proposal_signature.value
-                            && previous_legacy.seed_signature.value
-                                == current_legacy.seed_signature.value;
-                        if !is_same {
-                            let activity =
-                                ConflictingFinalize::new(previous_legacy, current_legacy);
+                        if previous.proposal != finalize.proposal
+                            || previous.vote.signature != finalize.vote.signature
+                        {
+                            let activity = ConflictingFinalize::new(
+                                previous.clone(),
+                                finalize.clone(),
+                            );
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
@@ -372,7 +354,7 @@ pub struct Actor<
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
 
-    _phantom: PhantomData<C>,
+    _phantom: PhantomData<(C, V)>,
 }
 
 impl<

@@ -350,7 +350,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                },
+                
+            },
             );
 
             // Start network
@@ -412,7 +413,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -449,7 +451,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -615,7 +619,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                },
+                
+            },
             );
 
             // Start network
@@ -698,7 +703,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -729,7 +735,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -808,7 +816,8 @@ mod tests {
                     Config {
                         max_size: 1024 * 1024,
                         disconnect_on_block: true,
-                    },
+                    
+            },
                 );
 
                 // Start network
@@ -868,7 +877,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
-                    };
+                    
+            };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
                         application_cfg,
@@ -905,7 +915,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
+                    
+            
+            };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
                     // Start engine
@@ -998,7 +1010,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                },
+                
+            },
             );
 
             // Start network
@@ -1062,7 +1075,8 @@ mod tests {
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants,
-                };
+                
+            };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
@@ -1071,7 +1085,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -1108,7 +1123,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -1206,6 +1223,7 @@ mod tests {
                 participant: validator.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+            
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -1243,6 +1261,8 @@ mod tests {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            
+            
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1287,7 +1307,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                },
+                
+            },
             );
 
             // Start network
@@ -1360,7 +1381,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -1397,7 +1419,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -1562,7 +1586,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                },
+                
+            },
             );
 
             // Start network
@@ -1625,7 +1650,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10_000.0, 0.0),
                         verify_latency: (10_000.0, 5.0),
-                    }
+                    
+            }
                 } else {
                     mocks::application::Config {
                         hasher: Sha256::default(),
@@ -1633,7 +1659,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
-                    }
+                    
+            }
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1671,7 +1698,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -1759,7 +1788,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -1821,7 +1851,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -1858,7 +1889,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -1982,7 +2015,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -2044,7 +2078,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -2081,7 +2116,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -2201,7 +2238,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -2263,7 +2301,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -2300,7 +2339,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -2389,7 +2430,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -2463,7 +2505,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
-                    };
+                    
+            };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
                         application_cfg,
@@ -2500,7 +2543,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
+                    
+            
+            };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
@@ -2588,7 +2633,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -2659,7 +2705,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
-                    };
+                    
+            };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
                         application_cfg,
@@ -2696,7 +2743,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
+                    
+            
+            };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
@@ -2772,7 +2821,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -2847,7 +2897,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
-                    };
+                    
+            };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
                         application_cfg,
@@ -2884,7 +2935,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
+                    
+            
+            };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
@@ -2956,7 +3009,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -3030,7 +3084,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
-                    };
+                    
+            };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
                         application_cfg,
@@ -3067,7 +3122,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
+                    
+            
+            };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
@@ -3139,7 +3196,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -3209,7 +3267,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
-                    };
+                    
+            };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
                         application_cfg,
@@ -3246,7 +3305,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
+                    
+            
+            };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
@@ -3331,7 +3392,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -3405,7 +3467,8 @@ mod tests {
                         participant: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
-                    };
+                    
+            };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
                         application_cfg,
@@ -3442,7 +3505,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    };
+                    
+            
+            };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
                 }
@@ -3507,7 +3572,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -3569,7 +3635,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (100.0, 50.0),
                     verify_latency: (50.0, 40.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -3606,7 +3673,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -3671,7 +3740,8 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                },
+                
+            },
             );
 
             // Start network
@@ -3742,7 +3812,8 @@ mod tests {
                     participant: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                };
+                
+            };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
                     application_cfg,
@@ -3779,7 +3850,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
+                
+            
+            };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
@@ -3814,7 +3887,7 @@ mod tests {
                 };
 
                 // Decrypt the message using the seed signature
-                let seed_signature = notarization.seed_signature;
+                let (_, seed_signature) = notarization.certificate();
                 let decrypted = decrypt::<V>(&seed_signature, &ciphertext)
                     .expect("Decryption should succeed with valid seed signature");
                 assert_eq!(
