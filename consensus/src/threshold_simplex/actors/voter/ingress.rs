@@ -1,10 +1,10 @@
-use crate::threshold_simplex::types::Voter;
+use crate::threshold_simplex::types::LegacyVoter;
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use futures::{channel::mpsc, stream, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message<V: Variant, D: Digest> {
-    Verified(Voter<V, D>),
+    Verified(LegacyVoter<V, D>),
 }
 
 #[derive(Clone)]
@@ -17,7 +17,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
         Self { sender }
     }
 
-    pub async fn verified(&mut self, voters: Vec<Voter<V, D>>) {
+    pub async fn verified(&mut self, voters: Vec<LegacyVoter<V, D>>) {
         self.sender
             .send_all(&mut stream::iter(
                 voters.into_iter().map(|voter| Ok(Message::Verified(voter))),

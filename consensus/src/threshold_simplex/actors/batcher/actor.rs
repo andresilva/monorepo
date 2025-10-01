@@ -4,10 +4,10 @@ use crate::{
         actors::voter,
         interesting,
         metrics::Inbound,
-        signing::SigningScheme,
+        signing::{self, SigningScheme},
         types::{
-            Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalize, Notarize, Nullify, NullifyFinalize, Voter,
+            Activity, BatchVerifier, ConflictingFinalize, ConflictingNotarize, Finalize, LegacyVoter,
+            Notarize, Nullify, NullifyFinalize, Voter,
         },
     },
     types::{Epoch, View},
@@ -53,9 +53,9 @@ struct Round<
     supervisor: S,
     signing: G,
     verifier: BatchVerifier<V, D, G>,
-    notarizes: Vec<Option<Notarize<V, D>>>,
-    nullifies: Vec<Option<Nullify<V>>>,
-    finalizes: Vec<Option<Finalize<V, D>>>,
+    notarizes: Vec<Option<signing::Notarize<G, D>>>,
+    nullifies: Vec<Option<signing::Nullify<G>>>,
+    finalizes: Vec<Option<signing::Finalize<G, D>>>,
 
     inbound_messages: Family<Inbound, Counter>,
 
@@ -121,34 +121,37 @@ where
         }
     }
 
-    async fn add(&mut self, sender: C, message: Voter<V, D>) -> bool {
-        // Check if sender is a participant
+    async fn add(&mut self, sender: C, message: Voter<G, D>) -> bool {
         let Some(index) = self.supervisor.is_participant(self.view, &sender) else {
             warn!(?sender, "blocking peer");
             self.blocker.block(sender).await;
             return false;
         };
 
-        // Attempt to reserve
         match message {
             Voter::Notarize(notarize) => {
-                // Update metrics
                 self.inbound_messages
                     .get_or_create(&Inbound::notarize(&sender))
                     .inc();
 
-                // Verify sender is signer
                 if index != notarize.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
                 }
 
-                // Try to reserve
-                match self.notarizes[index as usize] {
-                    Some(ref previous) => {
-                        if previous != &notarize {
-                            let activity = ConflictingNotarize::new(previous.clone(), notarize);
+                match self.notarizes[index as usize].as_ref() {
+                    Some(previous) => {
+                        let previous_legacy = Notarize::from_signing::<G>(previous.clone());
+                        let current_legacy = Notarize::from_signing::<G>(notarize.clone());
+                        let is_same = previous_legacy.proposal == current_legacy.proposal
+                            && previous_legacy.proposal_signature.value
+                                == current_legacy.proposal_signature.value
+                            && previous_legacy.seed_signature.value
+                                == current_legacy.seed_signature.value;
+                        if !is_same {
+                            let activity =
+                                ConflictingNotarize::new(previous_legacy, current_legacy);
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
@@ -162,27 +165,30 @@ where
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
                         self.notarizes[index as usize] = Some(notarize.clone());
-                        self.verifier.add(Voter::Notarize(notarize), false);
+                        self.verifier.add_signing(Voter::Notarize(notarize), false);
                         true
                     }
                 }
             }
             Voter::Nullify(nullify) => {
-                // Update metrics
                 self.inbound_messages
                     .get_or_create(&Inbound::nullify(&sender))
                     .inc();
 
-                // Verify sender is signer
                 if index != nullify.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
                 }
 
-                // Check if finalized
-                if let Some(ref previous) = self.finalizes[index as usize] {
-                    let activity = NullifyFinalize::new(nullify, previous.clone());
+                if let Some(previous) = self.finalizes[index as usize].as_ref() {
+                    let legacy_nullify: Nullify<V> = Nullify::from_signing::<G>(nullify.clone());
+                    let legacy_finalize: Finalize<V, D> =
+                        Finalize::from_signing::<G>(previous.clone());
+                    let activity = NullifyFinalize::new(
+                        legacy_nullify,
+                        legacy_finalize,
+                    );
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
@@ -191,10 +197,18 @@ where
                     return false;
                 }
 
-                // Try to reserve
-                match self.nullifies[index as usize] {
-                    Some(ref previous) => {
-                        if previous != &nullify {
+                match self.nullifies[index as usize].as_ref() {
+                    Some(previous) => {
+                        let previous_legacy: Nullify<V> =
+                            Nullify::from_signing::<G>(previous.clone());
+                        let current_legacy: Nullify<V> =
+                            Nullify::from_signing::<G>(nullify.clone());
+                        let is_same = previous_legacy.round == current_legacy.round
+                            && previous_legacy.view_signature.value
+                                == current_legacy.view_signature.value
+                            && previous_legacy.seed_signature.value
+                                == current_legacy.seed_signature.value;
+                        if !is_same {
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
@@ -205,40 +219,36 @@ where
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
                         self.nullifies[index as usize] = Some(nullify.clone());
-                        self.verifier.add(Voter::Nullify(nullify), false);
+                        self.verifier.add_signing(Voter::Nullify(nullify), false);
                         true
                     }
                 }
             }
             Voter::Finalize(finalize) => {
-                // Update metrics
                 self.inbound_messages
                     .get_or_create(&Inbound::finalize(&sender))
                     .inc();
 
-                // Verify sender is signer
                 if index != finalize.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
                 }
 
-                // Check if nullified
-                if let Some(ref previous) = self.nullifies[index as usize] {
-                    let activity = NullifyFinalize::new(previous.clone(), finalize);
-                    self.reporter
-                        .report(Activity::NullifyFinalize(activity))
-                        .await;
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
-                    return false;
-                }
-
-                // Try to reserve
-                match self.finalizes[index as usize] {
-                    Some(ref previous) => {
-                        if previous != &finalize {
-                            let activity = ConflictingFinalize::new(previous.clone(), finalize);
+                match self.finalizes[index as usize].as_ref() {
+                    Some(previous) => {
+                        let previous_legacy: Finalize<V, D> =
+                            Finalize::from_signing::<G>(previous.clone());
+                        let current_legacy: Finalize<V, D> =
+                            Finalize::from_signing::<G>(finalize.clone());
+                        let is_same = previous_legacy.proposal == current_legacy.proposal
+                            && previous_legacy.proposal_signature.value
+                                == current_legacy.proposal_signature.value
+                            && previous_legacy.seed_signature.value
+                                == current_legacy.seed_signature.value;
+                        if !is_same {
+                            let activity =
+                                ConflictingFinalize::new(previous_legacy, current_legacy);
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
@@ -252,7 +262,7 @@ where
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
                         self.finalizes[index as usize] = Some(finalize.clone());
-                        self.verifier.add(Voter::Finalize(finalize), false);
+                        self.verifier.add_signing(Voter::Finalize(finalize), false);
                         true
                     }
                 }
@@ -265,7 +275,7 @@ where
         }
     }
 
-    async fn add_constructed(&mut self, message: Voter<V, D>) {
+    async fn add_constructed(&mut self, message: Voter<G, D>) {
         match &message {
             Voter::Notarize(notarize) => {
                 let signer = notarize.signer() as usize;
@@ -292,7 +302,7 @@ where
                 unreachable!("recovered messages should be sent to batcher");
             }
         }
-        self.verifier.add(message, true);
+        self.verifier.add_signing(message, true);
     }
 
     fn set_leader(&mut self, leader: u32) {
@@ -303,27 +313,39 @@ where
         self.verifier.ready_notarizes()
     }
 
-    fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
+    fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<LegacyVoter<V, D>>, Vec<u32>) {
         let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_notarizes(namespace, polynomial)
+        let (voters, failed) = self.verifier.verify_notarizes(namespace, polynomial);
+        (
+            voters.into_iter().map(LegacyVoter::from).collect(),
+            failed,
+        )
     }
 
     fn ready_nullifies(&self) -> bool {
         self.verifier.ready_nullifies()
     }
 
-    fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
+    fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<LegacyVoter<V, D>>, Vec<u32>) {
         let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_nullifies(namespace, polynomial)
+        let (voters, failed) = self.verifier.verify_nullifies(namespace, polynomial);
+        (
+            voters.into_iter().map(LegacyVoter::from).collect(),
+            failed,
+        )
     }
 
     fn ready_finalizes(&self) -> bool {
         self.verifier.ready_finalizes()
     }
 
-    fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
+    fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<LegacyVoter<V, D>>, Vec<u32>) {
         let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_finalizes(namespace, polynomial)
+        let (voters, failed) = self.verifier.verify_finalizes(namespace, polynomial);
+        (
+            voters.into_iter().map(LegacyVoter::from).collect(),
+            failed,
+        )
     }
 
     fn is_active(&self, leader: &C) -> Option<bool> {
@@ -465,7 +487,8 @@ where
         receiver: impl Receiver<PublicKey = C>,
     ) {
         // Wrap channel
-        let mut receiver: WrappedReceiver<_, Voter<V, D>> = WrappedReceiver::new((), receiver);
+        let mut receiver: WrappedReceiver<_, LegacyVoter<V, D>> =
+            WrappedReceiver::new((), receiver);
 
         // Initialize view data structures
         let mut current: View = 0;
@@ -543,6 +566,8 @@ where
                                 continue;
                             }
 
+                            let message: Voter<G, D> = message.into();
+
                             // Add the message to the verifier
                             work.entry(view).or_insert(
                                 Round::new(
@@ -593,6 +618,8 @@ where
                     ) {
                         continue;
                     }
+
+                    let message: Voter<G, D> = message.into();
 
                     // Add the message to the verifier
                     let added = work.entry(view).or_insert(

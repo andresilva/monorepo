@@ -6,7 +6,7 @@ use crate::{
     threshold_simplex::{
         actors::voter,
         signing::{self, SigningScheme},
-        types::{Backfiller, Notarization, Nullification, Request, Voter},
+        types::{Backfiller, LegacyVoter, Notarization, Nullification, Request},
     },
     types::{Epoch, View},
     ThresholdSupervisor, Viewable,
@@ -569,7 +569,8 @@ where
                             }
 
                             // Update cache
-                            let mut voters = Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
+                            let mut voters: Vec<LegacyVoter<V, D>> =
+                                Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
                             let mut notarizations_found = BTreeSet::new();
                             for notarization in response.notarizations {
                                 let view = notarization.view();
@@ -580,7 +581,7 @@ where
                                 }
                                 let legacy = Notarization::from_signing::<G>(notarization.clone());
                                 self.notarizations.insert(view, notarization);
-                                voters.push(Voter::Notarization(legacy));
+                                voters.push(LegacyVoter::Notarization(legacy));
                                 notarizations_found.insert(view);
                             }
                             let mut nullifications_found = BTreeSet::new();
@@ -593,7 +594,7 @@ where
                                 }
                                 let legacy = Nullification::from_signing::<G>(nullification.clone());
                                 self.nullifications.insert(view, nullification);
-                                voters.push(Voter::Nullification(legacy));
+                                voters.push(LegacyVoter::Nullification(legacy));
                                 nullifications_found.insert(view);
                             }
 

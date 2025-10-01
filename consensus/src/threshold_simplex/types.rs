@@ -216,7 +216,11 @@ impl<
     ///
     /// * `msg` - The [Voter] message to add.
     /// * `verified` - A boolean indicating if the message has already been verified.
-    pub fn add(&mut self, msg: Voter<V, D>, verified: bool) {
+    pub fn add(&mut self, msg: LegacyVoter<V, D>, verified: bool) {
+        self.add_signing(msg.into(), verified);
+    }
+
+    pub fn add_signing(&mut self, msg: Voter<G, D>, verified: bool) {
         match msg {
             Voter::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
@@ -236,31 +240,14 @@ impl<
                 if verified {
                     self.notarizes_verified += 1;
                 } else {
-                    let signing_notarize = signing::Notarize {
-                        proposal: notarize.proposal.clone(),
-                        vote: Vote {
-                            signer: notarize.signer(),
-                            signature: (
-                                notarize.proposal_signature.value,
-                                notarize.seed_signature.value,
-                            ),
-                        },
-                    };
-                    self.notarizes.push(signing_notarize);
+                    self.notarizes.push(notarize);
                 }
             }
             Voter::Nullify(nullify) => {
                 if verified {
                     self.nullifies_verified += 1;
                 } else {
-                    let signing_nullify = signing::Nullify {
-                        round: nullify.round,
-                        vote: Vote {
-                            signer: nullify.signer(),
-                            signature: (nullify.view_signature.value, nullify.seed_signature.value),
-                        },
-                    };
-                    self.nullifies.push(signing_nullify);
+                    self.nullifies.push(nullify);
                 }
             }
             Voter::Finalize(finalize) => {
@@ -275,17 +262,7 @@ impl<
                 if verified {
                     self.finalizes_verified += 1;
                 } else {
-                    let signing_finalize = signing::Finalize {
-                        proposal: finalize.proposal.clone(),
-                        vote: Vote {
-                            signer: finalize.signer(),
-                            signature: (
-                                finalize.proposal_signature.value,
-                                finalize.seed_signature.value,
-                            ),
-                        },
-                    };
-                    self.finalizes.push(signing_finalize);
+                    self.finalizes.push(finalize);
                 }
             }
             Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
@@ -309,7 +286,11 @@ impl<
         self.leader = Some(leader);
 
         // Look for a notarize from the leader
-        let Some(notarize) = self.notarizes.iter().find(|n| n.signer() == leader) else {
+        let Some(notarize) = self
+            .notarizes
+            .iter()
+            .find(|n| n.vote.signer == leader)
+        else {
             return;
         };
 
@@ -330,13 +311,13 @@ impl<
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Notarize] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<G, D>>` of successfully verified [Voter::Notarize] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_notarizes(
         &mut self,
         namespace: &[u8],
         polynomial: &[V::Public],
-    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+    ) -> (Vec<Voter<G, D>>, Vec<u32>) {
         self.notarizes_force = false;
         let pending = std::mem::take(&mut self.notarizes);
 
@@ -397,20 +378,27 @@ impl<
 
             let voters = verified
                 .into_iter()
-                .map(|notarize| Voter::Notarize(Notarize::from_signing::<G>(notarize)))
+                .map(Voter::Notarize)
                 .collect();
 
             return (voters, failed.into_iter().collect());
         }
 
         // Fallback to legacy verification when no signing scheme is available.
-        let pending_legacy: Vec<Notarize<V, D>> = pending
+        let pending_legacy: Vec<LegacyNotarize<V, D>> = pending
             .into_iter()
-            .map(Notarize::from_signing::<G>)
+            .map(LegacyNotarize::from_signing::<G>)
             .collect();
-        let (notarizes, failed) = Notarize::verify_multiple(namespace, polynomial, pending_legacy);
+        let (notarizes, failed) =
+            LegacyNotarize::verify_multiple(namespace, polynomial, pending_legacy);
         self.notarizes_verified += notarizes.len();
-        (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
+        (
+            notarizes
+                .into_iter()
+                .map(|legacy| Voter::Notarize(legacy.into_signing::<G>()))
+                .collect(),
+            failed,
+        )
     }
 
     /// Checks if there are [Voter::Notarize] messages ready for batch verification.
@@ -474,13 +462,13 @@ impl<
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Nullify] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<G, D>>` of successfully verified [Voter::Nullify] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_nullifies(
         &mut self,
         namespace: &[u8],
         polynomial: &[V::Public],
-    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+    ) -> (Vec<Voter<G, D>>, Vec<u32>) {
         let pending = std::mem::take(&mut self.nullifies);
 
         if pending.is_empty() {
@@ -536,19 +524,26 @@ impl<
 
             let voters = verified
                 .into_iter()
-                .map(|nullify| Voter::Nullify(Nullify::from_signing::<G>(nullify)))
+                .map(Voter::Nullify)
                 .collect();
 
             return (voters, failed.into_iter().collect());
         }
 
-        let pending_legacy: Vec<Nullify<V>> = pending
+        let pending_legacy: Vec<LegacyNullify<V>> = pending
             .into_iter()
-            .map(Nullify::from_signing::<G>)
+            .map(LegacyNullify::from_signing::<G>)
             .collect();
-        let (nullifies, failed) = Nullify::verify_multiple(namespace, polynomial, pending_legacy);
+        let (nullifies, failed) =
+            LegacyNullify::verify_multiple(namespace, polynomial, pending_legacy);
         self.nullifies_verified += nullifies.len();
-        (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
+        (
+            nullifies
+                .into_iter()
+                .map(|legacy| Voter::Nullify(legacy.into_signing::<G>()))
+                .collect(),
+            failed,
+        )
     }
 
     /// Checks if there are [Voter::Nullify] messages ready for batch verification.
@@ -597,13 +592,13 @@ impl<
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Finalize] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<G, D>>` of successfully verified [Voter::Finalize] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_finalizes(
         &mut self,
         namespace: &[u8],
         polynomial: &[V::Public],
-    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+    ) -> (Vec<Voter<G, D>>, Vec<u32>) {
         let pending = std::mem::take(&mut self.finalizes);
 
         if pending.is_empty() {
@@ -663,19 +658,26 @@ impl<
 
             let voters = verified
                 .into_iter()
-                .map(|finalize| Voter::Finalize(Finalize::from_signing::<G>(finalize)))
+                .map(Voter::Finalize)
                 .collect();
 
             return (voters, failed.into_iter().collect());
         }
 
-        let pending_legacy: Vec<Finalize<V, D>> = pending
+        let pending_legacy: Vec<LegacyFinalize<V, D>> = pending
             .into_iter()
-            .map(Finalize::from_signing::<G>)
+            .map(LegacyFinalize::from_signing::<G>)
             .collect();
-        let (finalizes, failed) = Finalize::verify_multiple(namespace, polynomial, pending_legacy);
+        let (finalizes, failed) =
+            LegacyFinalize::verify_multiple(namespace, polynomial, pending_legacy);
         self.finalizes_verified += finalizes.len();
-        (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
+        (
+            finalizes
+                .into_iter()
+                .map(|legacy| Voter::Finalize(legacy.into_signing::<G>()))
+                .collect(),
+            failed,
+        )
     }
 
     /// Checks if there are [Voter::Finalize] messages ready for batch verification.
@@ -721,7 +723,7 @@ impl<
 /// Voter represents all possible message types that can be sent by validators
 /// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Voter<V: Variant, D: Digest> {
+pub enum LegacyVoter<V: Variant, D: Digest> {
     /// A single validator notarize over a proposal
     Notarize(Notarize<V, D>),
     /// A recovered threshold signature for a notarization
@@ -736,7 +738,278 @@ pub enum Voter<V: Variant, D: Digest> {
     Finalization(Finalization<V, D>),
 }
 
-impl<V: Variant, D: Digest> Write for Voter<V, D> {
+impl<V: Variant, D: Digest> Write for LegacyVoter<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            LegacyVoter::Notarize(v) => {
+                0u8.write(writer);
+                v.write(writer);
+            }
+            LegacyVoter::Notarization(v) => {
+                1u8.write(writer);
+                v.write(writer);
+            }
+            LegacyVoter::Nullify(v) => {
+                2u8.write(writer);
+                v.write(writer);
+            }
+            LegacyVoter::Nullification(v) => {
+                3u8.write(writer);
+                v.write(writer);
+            }
+            LegacyVoter::Finalize(v) => {
+                4u8.write(writer);
+                v.write(writer);
+            }
+            LegacyVoter::Finalization(v) => {
+                5u8.write(writer);
+                v.write(writer);
+            }
+        }
+    }
+}
+
+impl<V: Variant, D: Digest> EncodeSize for LegacyVoter<V, D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            LegacyVoter::Notarize(v) => v.encode_size(),
+            LegacyVoter::Notarization(v) => v.encode_size(),
+            LegacyVoter::Nullify(v) => v.encode_size(),
+            LegacyVoter::Nullification(v) => v.encode_size(),
+            LegacyVoter::Finalize(v) => v.encode_size(),
+            LegacyVoter::Finalization(v) => v.encode_size(),
+        }
+    }
+}
+
+impl<V: Variant, D: Digest> Read for LegacyVoter<V, D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let tag = <u8>::read(reader)?;
+        match tag {
+            0 => {
+                let v = Notarize::read(reader)?;
+                Ok(LegacyVoter::Notarize(v))
+            }
+            1 => {
+                let v = Notarization::read(reader)?;
+                Ok(LegacyVoter::Notarization(v))
+            }
+            2 => {
+                let v = Nullify::read(reader)?;
+                Ok(LegacyVoter::Nullify(v))
+            }
+            3 => {
+                let v = Nullification::read(reader)?;
+                Ok(LegacyVoter::Nullification(v))
+            }
+            4 => {
+                let v = Finalize::read(reader)?;
+                Ok(LegacyVoter::Finalize(v))
+            }
+            5 => {
+                let v = Finalization::read(reader)?;
+                Ok(LegacyVoter::Finalization(v))
+            }
+            _ => Err(Error::Invalid(
+                "consensus::threshold_simplex::Voter",
+                "Invalid type",
+            )),
+        }
+    }
+}
+
+impl<V: Variant, D: Digest> Epochable for LegacyVoter<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        match self {
+            LegacyVoter::Notarize(v) => v.epoch(),
+            LegacyVoter::Notarization(v) => v.epoch(),
+            LegacyVoter::Nullify(v) => v.epoch(),
+            LegacyVoter::Nullification(v) => v.epoch(),
+            LegacyVoter::Finalize(v) => v.epoch(),
+            LegacyVoter::Finalization(v) => v.epoch(),
+        }
+    }
+}
+
+impl<V: Variant, D: Digest> Viewable for LegacyVoter<V, D> {
+    type View = View;
+
+    fn view(&self) -> View {
+        match self {
+            LegacyVoter::Notarize(v) => v.view(),
+            LegacyVoter::Notarization(v) => v.view(),
+            LegacyVoter::Nullify(v) => v.view(),
+            LegacyVoter::Nullification(v) => v.view(),
+            LegacyVoter::Finalize(v) => v.view(),
+            LegacyVoter::Finalization(v) => v.view(),
+        }
+    }
+}
+
+type LegacyNotarize<V, D> = Notarize<V, D>;
+type LegacyNotarization<V, D> = Notarization<V, D>;
+type LegacyNullify<V> = Nullify<V>;
+type LegacyNullification<V> = Nullification<V>;
+type LegacyFinalize<V, D> = Finalize<V, D>;
+type LegacyFinalization<V, D> = Finalization<V, D>;
+
+/// Signing-native voter message used by the new simplex pipeline.
+#[derive(Clone)]
+pub enum Voter<G: SigningScheme, D: Digest> {
+    /// Validator’s partial notarize vote.
+    Notarize(signing::Notarize<G, D>),
+    /// Aggregated notarization certificate.
+    Notarization(signing::Notarization<G, D>),
+    /// Validator’s partial nullify vote.
+    Nullify(signing::Nullify<G>),
+    /// Aggregated nullification certificate.
+    Nullification(signing::Nullification<G>),
+    /// Validator’s partial finalize vote.
+    Finalize(signing::Finalize<G, D>),
+    /// Aggregated finalization certificate.
+    Finalization(signing::Finalization<G, D>),
+}
+
+impl<G: SigningScheme, D: Digest> Voter<G, D> {
+    pub fn view(&self) -> View {
+        match self {
+            Voter::Notarize(v) => v.proposal.view(),
+            Voter::Notarization(v) => v.view(),
+            Voter::Nullify(v) => v.round.view(),
+            Voter::Nullification(v) => v.view(),
+            Voter::Finalize(v) => v.proposal.view(),
+            Voter::Finalization(v) => v.view(),
+        }
+    }
+
+    pub fn epoch(&self) -> Epoch {
+        match self {
+            Voter::Notarize(v) => v.proposal.round.epoch(),
+            Voter::Notarization(v) => v.epoch(),
+            Voter::Nullify(v) => v.round.epoch(),
+            Voter::Nullification(v) => v.epoch(),
+            Voter::Finalize(v) => v.proposal.round.epoch(),
+            Voter::Finalization(v) => v.epoch(),
+        }
+    }
+
+    pub fn signer(&self) -> Option<G::SignerId>
+    where
+        G::SignerId: Clone,
+    {
+        match self {
+            Voter::Notarize(v) => Some(v.vote.signer.clone()),
+            Voter::Nullify(v) => Some(v.vote.signer.clone()),
+            Voter::Finalize(v) => Some(v.vote.signer.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl<V, D, G> From<LegacyVoter<V, D>> for Voter<G, D>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
+    fn from(voter: LegacyVoter<V, D>) -> Self {
+        match voter {
+            LegacyVoter::Notarize(v) => {
+                let signer = v.proposal_signature.index;
+                let proposal_signature = v.proposal_signature.value;
+                let seed_signature = v.seed_signature.value;
+                let proposal = v.proposal;
+                Voter::Notarize(signing::Notarize {
+                    proposal,
+                    vote: Vote {
+                        signer,
+                        signature: (proposal_signature, seed_signature),
+                    },
+                })
+            }
+            LegacyVoter::Notarization(v) => Voter::Notarization(v.into_signing::<G>()),
+            LegacyVoter::Nullify(v) => {
+                let signer = v.view_signature.index;
+                let view_signature = v.view_signature.value;
+                let seed_signature = v.seed_signature.value;
+                let round = v.round;
+                Voter::Nullify(signing::Nullify {
+                    round,
+                    vote: Vote {
+                        signer,
+                        signature: (view_signature, seed_signature),
+                    },
+                })
+            }
+            LegacyVoter::Nullification(v) => Voter::Nullification(v.into_signing::<G>()),
+            LegacyVoter::Finalize(v) => {
+                let signer = v.proposal_signature.index;
+                let proposal_signature = v.proposal_signature.value;
+                let seed_signature = v.seed_signature.value;
+                let proposal = v.proposal;
+                Voter::Finalize(signing::Finalize {
+                    proposal,
+                    vote: Vote {
+                        signer,
+                        signature: (proposal_signature, seed_signature),
+                    },
+                })
+            }
+            LegacyVoter::Finalization(v) => Voter::Finalization(v.into_signing::<G>()),
+        }
+    }
+}
+
+impl<V, D, G> From<Voter<G, D>> for LegacyVoter<V, D>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
+    fn from(voter: Voter<G, D>) -> Self {
+        match voter {
+            Voter::Notarize(v) => LegacyVoter::Notarize(LegacyNotarize::from_signing::<G>(v)),
+            Voter::Notarization(v) => {
+                LegacyVoter::Notarization(LegacyNotarization::from_signing::<G>(v))
+            }
+            Voter::Nullify(v) => LegacyVoter::Nullify(LegacyNullify::from_signing::<G>(v)),
+            Voter::Nullification(v) => {
+                LegacyVoter::Nullification(LegacyNullification::from_signing::<G>(v))
+            }
+            Voter::Finalize(v) => LegacyVoter::Finalize(LegacyFinalize::from_signing::<G>(v)),
+            Voter::Finalization(v) => {
+                LegacyVoter::Finalization(LegacyFinalization::from_signing::<G>(v))
+            }
+        }
+    }
+}
+
+impl<G: SigningScheme, D: Digest> EncodeSize for Voter<G, D> {
+    fn encode_size(&self) -> usize {
+        match self {
+            Voter::Notarize(v) => v.encode_size() + 1,
+            Voter::Notarization(v) => v.encode_size() + 1,
+            Voter::Nullify(v) => v.encode_size() + 1,
+            Voter::Nullification(v) => v.encode_size() + 1,
+            Voter::Finalize(v) => v.encode_size() + 1,
+            Voter::Finalization(v) => v.encode_size() + 1,
+        }
+    }
+}
+
+impl<G: SigningScheme, D: Digest> Write for Voter<G, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Voter::Notarize(v) => {
@@ -767,49 +1040,18 @@ impl<V: Variant, D: Digest> Write for Voter<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Voter<V, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Voter::Notarize(v) => v.encode_size(),
-            Voter::Notarization(v) => v.encode_size(),
-            Voter::Nullify(v) => v.encode_size(),
-            Voter::Nullification(v) => v.encode_size(),
-            Voter::Finalize(v) => v.encode_size(),
-            Voter::Finalization(v) => v.encode_size(),
-        }
-    }
-}
-
-impl<V: Variant, D: Digest> Read for Voter<V, D> {
+impl<G: SigningScheme, D: Digest> Read for Voter<G, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
-            0 => {
-                let v = Notarize::read(reader)?;
-                Ok(Voter::Notarize(v))
-            }
-            1 => {
-                let v = Notarization::read(reader)?;
-                Ok(Voter::Notarization(v))
-            }
-            2 => {
-                let v = Nullify::read(reader)?;
-                Ok(Voter::Nullify(v))
-            }
-            3 => {
-                let v = Nullification::read(reader)?;
-                Ok(Voter::Nullification(v))
-            }
-            4 => {
-                let v = Finalize::read(reader)?;
-                Ok(Voter::Finalize(v))
-            }
-            5 => {
-                let v = Finalization::read(reader)?;
-                Ok(Voter::Finalization(v))
-            }
+            0 => Ok(Voter::Notarize(signing::Notarize::<G, D>::read(reader)?)),
+            1 => Ok(Voter::Notarization(signing::Notarization::<G, D>::read(reader)?)),
+            2 => Ok(Voter::Nullify(signing::Nullify::<G>::read(reader)?)),
+            3 => Ok(Voter::Nullification(signing::Nullification::<G>::read(reader)?)),
+            4 => Ok(Voter::Finalize(signing::Finalize::<G, D>::read(reader)?)),
+            5 => Ok(Voter::Finalization(signing::Finalization::<G, D>::read(reader)?)),
             _ => Err(Error::Invalid(
                 "consensus::threshold_simplex::Voter",
                 "Invalid type",
@@ -818,31 +1060,31 @@ impl<V: Variant, D: Digest> Read for Voter<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for Voter<V, D> {
+impl<G: SigningScheme, D: Digest> Epochable for Voter<G, D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
         match self {
-            Voter::Notarize(v) => v.epoch(),
+            Voter::Notarize(v) => v.proposal.round.epoch(),
             Voter::Notarization(v) => v.epoch(),
-            Voter::Nullify(v) => v.epoch(),
+            Voter::Nullify(v) => v.round.epoch(),
             Voter::Nullification(v) => v.epoch(),
-            Voter::Finalize(v) => v.epoch(),
+            Voter::Finalize(v) => v.proposal.round.epoch(),
             Voter::Finalization(v) => v.epoch(),
         }
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for Voter<V, D> {
+impl<G: SigningScheme, D: Digest> Viewable for Voter<G, D> {
     type View = View;
 
     fn view(&self) -> View {
         match self {
-            Voter::Notarize(v) => v.view(),
+            Voter::Notarize(v) => v.proposal.view(),
             Voter::Notarization(v) => v.view(),
-            Voter::Nullify(v) => v.view(),
+            Voter::Nullify(v) => v.round.view(),
             Voter::Nullification(v) => v.view(),
-            Voter::Finalize(v) => v.view(),
+            Voter::Finalize(v) => v.proposal.view(),
             Voter::Finalization(v) => v.view(),
         }
     }
@@ -1053,6 +1295,24 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         let seed_signature =
             partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &seed_message);
         Notarize::new(proposal, proposal_signature, seed_signature)
+    }
+
+    /// Convert this legacy notarize into the signing representation.
+    pub fn into_signing<S>(self) -> signing::Notarize<S, D>
+    where
+        S: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        signing::Notarize {
+            proposal: self.proposal,
+            vote: Vote {
+                signer: self.proposal_signature.index,
+                signature: (self.proposal_signature.value, self.seed_signature.value),
+            },
+        }
     }
 
     /// Convert a signing-module notarize into the legacy representation.
@@ -1424,6 +1684,23 @@ impl<V: Variant> Nullify<V> {
         Nullify::new(round, view_signature, seed_signature)
     }
 
+    pub fn into_signing<S>(self) -> signing::Nullify<S>
+    where
+        S: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        signing::Nullify {
+            round: self.round,
+            vote: Vote {
+                signer: self.view_signature.index,
+                signature: (self.view_signature.value, self.seed_signature.value),
+            },
+        }
+    }
+
     /// Convert a signing-module nullify into the legacy representation.
     pub fn from_signing<S>(nullify: signing::Nullify<S>) -> Self
     where
@@ -1787,6 +2064,23 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         let seed_signature =
             partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &seed_message);
         Finalize::new(proposal, proposal_signature, seed_signature)
+    }
+
+    pub fn into_signing<S>(self) -> signing::Finalize<S, D>
+    where
+        S: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        signing::Finalize {
+            proposal: self.proposal,
+            vote: Vote {
+                signer: self.proposal_signature.index,
+                signature: (self.proposal_signature.value, self.seed_signature.value),
+            },
+        }
     }
 
     /// Convert a signing-module finalize vote into the legacy representation.
@@ -2198,7 +2492,7 @@ impl Read for Request {
 /// Response is a message containing the requested notarizations and nullifications.
 /// This is sent in response to a Request message.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Response<V: Variant, D: Digest> {
+pub struct LegacyResponse<V: Variant, D: Digest> {
     /// Identifier matching the original request
     pub id: u64,
     /// Notarizations for the requested views
@@ -2207,14 +2501,14 @@ pub struct Response<V: Variant, D: Digest> {
     pub nullifications: Vec<Nullification<V>>,
 }
 
-impl<V: Variant, D: Digest> Response<V, D> {
+impl<V: Variant, D: Digest> LegacyResponse<V, D> {
     /// Creates a new response with the given id, notarizations, and nullifications.
     pub fn new(
         id: u64,
         notarizations: Vec<Notarization<V, D>>,
         nullifications: Vec<Nullification<V>>,
     ) -> Self {
-        Response {
+        LegacyResponse {
             id,
             notarizations,
             nullifications,
@@ -2358,7 +2652,7 @@ impl<V: Variant, D: Digest> Response<V, D> {
             Certificate = (V::Signature, V::Signature),
         >,
     {
-        Response {
+        LegacyResponse {
             id: response.id,
             notarizations: response
                 .notarizations
@@ -2374,7 +2668,7 @@ impl<V: Variant, D: Digest> Response<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for Response<V, D> {
+impl<V: Variant, D: Digest> Write for LegacyResponse<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.id).write(writer);
         self.notarizations.write(writer);
@@ -2382,7 +2676,7 @@ impl<V: Variant, D: Digest> Write for Response<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Response<V, D> {
+impl<V: Variant, D: Digest> EncodeSize for LegacyResponse<V, D> {
     fn encode_size(&self) -> usize {
         UInt(self.id).encode_size()
             + self.notarizations.encode_size()
@@ -2390,7 +2684,7 @@ impl<V: Variant, D: Digest> EncodeSize for Response<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Response<V, D> {
+impl<V: Variant, D: Digest> Read for LegacyResponse<V, D> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
@@ -2400,7 +2694,7 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
         for notarization in notarizations.iter() {
             if !views.insert(notarization.proposal.view()) {
                 return Err(Error::Invalid(
-                    "consensus::threshold_simplex::Response",
+                    "consensus::threshold_simplex::LegacyResponse",
                     "Duplicate notarization",
                 ));
             }
@@ -2411,15 +2705,105 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
         for nullification in nullifications.iter() {
             if !views.insert(nullification.view()) {
                 return Err(Error::Invalid(
-                    "consensus::threshold_simplex::Response",
+                    "consensus::threshold_simplex::LegacyResponse",
                     "Duplicate nullification",
                 ));
             }
         }
-        Ok(Response {
+        Ok(LegacyResponse {
             id,
             notarizations,
             nullifications,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct Response<G: SigningScheme, D: Digest> {
+    inner: signing::Response<G, D>,
+}
+
+impl<G: SigningScheme, D: Digest> Response<G, D> {
+    pub fn new(
+        id: u64,
+        notarizations: Vec<signing::Notarization<G, D>>,
+        nullifications: Vec<signing::Nullification<G>>,
+    ) -> Self {
+        Self {
+            inner: signing::Response::new(id, notarizations, nullifications),
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.inner.id
+    }
+
+    pub fn notarizations(&self) -> &[signing::Notarization<G, D>] {
+        &self.inner.notarizations
+    }
+
+    pub fn nullifications(&self) -> &[signing::Nullification<G>] {
+        &self.inner.nullifications
+    }
+
+    pub fn verify(&self, scheme: &G, namespace: &[u8]) -> Result<(), signing::Error>
+    where
+        G::Randomness: Clone + PartialEq,
+    {
+        self.inner.verify(scheme, namespace)
+    }
+}
+
+impl<V, D, G> From<LegacyResponse<V, D>> for Response<G, D>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
+    fn from(response: LegacyResponse<V, D>) -> Self {
+        Response {
+            inner: response.into_signing::<G>(),
+        }
+    }
+}
+
+impl<V, D, G> From<Response<G, D>> for LegacyResponse<V, D>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
+    fn from(response: Response<G, D>) -> Self {
+        LegacyResponse::from_signing::<G>(response.inner)
+    }
+}
+
+impl<G: SigningScheme, D: Digest> EncodeSize for Response<G, D> {
+    fn encode_size(&self) -> usize {
+        self.inner.encode_size()
+    }
+}
+
+impl<G: SigningScheme, D: Digest> Write for Response<G, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.inner.write(writer);
+    }
+}
+
+impl<G: SigningScheme, D: Digest> Read for Response<G, D> {
+    type Cfg = usize;
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
+        Ok(Response {
+            inner: signing::Response::<G, D>::read_cfg(reader, cfg)?,
         })
     }
 }
@@ -2438,7 +2822,7 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
 /// For this reason, it is not sound to use [PartialSignature]-backed [Activity] to reward participants
 /// for their contributions (as an attacker, for example, could forge contributions from offline participants).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Activity<V, D, G>
+pub enum LegacyActivity<V, D, G>
 where
     V: Variant,
     D: Digest,
@@ -2464,7 +2848,7 @@ where
     NullifyFinalize(NullifyFinalize<V, D>),
 }
 
-impl<V, D, G> Activity<V, D, G>
+impl<V, D, G> LegacyActivity<V, D, G>
 where
     V: Variant,
     D: Digest,
@@ -2473,15 +2857,327 @@ where
     /// Indicates whether the activity has been verified by consensus.
     pub fn verified(&self) -> bool {
         match self {
-            Activity::Notarize(_) => false,
-            Activity::Notarization(_) => true,
-            Activity::Nullify(_) => false,
-            Activity::Nullification(_) => true,
-            Activity::Finalize(_) => false,
-            Activity::Finalization(_) => true,
-            Activity::ConflictingNotarize(_) => false,
-            Activity::ConflictingFinalize(_) => false,
-            Activity::NullifyFinalize(_) => false,
+            LegacyActivity::Notarize(_) => false,
+            LegacyActivity::Notarization(_) => true,
+            LegacyActivity::Nullify(_) => false,
+            LegacyActivity::Nullification(_) => true,
+            LegacyActivity::Finalize(_) => false,
+            LegacyActivity::Finalization(_) => true,
+            LegacyActivity::ConflictingNotarize(_) => false,
+            LegacyActivity::ConflictingFinalize(_) => false,
+            LegacyActivity::NullifyFinalize(_) => false,
+        }
+    }
+}
+
+impl<V, D, G> Write for LegacyActivity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+    G::Certificate: Write,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            LegacyActivity::Notarize(v) => {
+                0u8.write(writer);
+                v.write(writer);
+            }
+            LegacyActivity::Notarization(v) => {
+                1u8.write(writer);
+                v.write(writer);
+            }
+            LegacyActivity::Nullify(v) => {
+                2u8.write(writer);
+                v.write(writer);
+            }
+            LegacyActivity::Nullification(v) => {
+                3u8.write(writer);
+                v.write(writer);
+            }
+            LegacyActivity::Finalize(v) => {
+                4u8.write(writer);
+                v.write(writer);
+            }
+            LegacyActivity::Finalization(v) => {
+                5u8.write(writer);
+                v.write(writer);
+            }
+            LegacyActivity::ConflictingNotarize(v) => {
+                6u8.write(writer);
+                v.write(writer);
+            }
+            LegacyActivity::ConflictingFinalize(v) => {
+                7u8.write(writer);
+                v.write(writer);
+            }
+            LegacyActivity::NullifyFinalize(v) => {
+                8u8.write(writer);
+                v.write(writer);
+            }
+        }
+    }
+}
+
+impl<V, D, G> EncodeSize for LegacyActivity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+    G::Certificate: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            LegacyActivity::Notarize(v) => v.encode_size(),
+            LegacyActivity::Notarization(v) => v.encode_size(),
+            LegacyActivity::Nullify(v) => v.encode_size(),
+            LegacyActivity::Nullification(v) => v.encode_size(),
+            LegacyActivity::Finalize(v) => v.encode_size(),
+            LegacyActivity::Finalization(v) => v.encode_size(),
+            LegacyActivity::ConflictingNotarize(v) => v.encode_size(),
+            LegacyActivity::ConflictingFinalize(v) => v.encode_size(),
+            LegacyActivity::NullifyFinalize(v) => v.encode_size(),
+        }
+    }
+}
+
+impl<V, D, G> Read for LegacyActivity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+    G::Certificate: Read<Cfg = G::CertificateReadCfg>,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let tag = <u8>::read(reader)?;
+        match tag {
+            0 => {
+                let v = Notarize::<V, D>::read(reader)?;
+                Ok(LegacyActivity::Notarize(v))
+            }
+            1 => {
+                let v = signing::Notarization::<G, D>::read(reader)?;
+                Ok(LegacyActivity::Notarization(v))
+            }
+            2 => {
+                let v = Nullify::<V>::read(reader)?;
+                Ok(LegacyActivity::Nullify(v))
+            }
+            3 => {
+                let v = signing::Nullification::<G>::read(reader)?;
+                Ok(LegacyActivity::Nullification(v))
+            }
+            4 => {
+                let v = Finalize::<V, D>::read(reader)?;
+                Ok(LegacyActivity::Finalize(v))
+            }
+            5 => {
+                let v = signing::Finalization::<G, D>::read(reader)?;
+                Ok(LegacyActivity::Finalization(v))
+            }
+            6 => {
+                let v = ConflictingNotarize::<V, D>::read(reader)?;
+                Ok(LegacyActivity::ConflictingNotarize(v))
+            }
+            7 => {
+                let v = ConflictingFinalize::<V, D>::read(reader)?;
+                Ok(LegacyActivity::ConflictingFinalize(v))
+            }
+            8 => {
+                let v = NullifyFinalize::<V, D>::read(reader)?;
+                Ok(LegacyActivity::NullifyFinalize(v))
+            }
+            _ => Err(Error::Invalid(
+                "consensus::threshold_simplex::Activity",
+                "Invalid type",
+            )),
+        }
+    }
+}
+
+impl<V, D, G> Epochable for LegacyActivity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        match self {
+            LegacyActivity::Notarize(v) => v.epoch(),
+            LegacyActivity::Notarization(v) => v.epoch(),
+            LegacyActivity::Nullify(v) => v.epoch(),
+            LegacyActivity::Nullification(v) => v.epoch(),
+            LegacyActivity::Finalize(v) => v.epoch(),
+            LegacyActivity::Finalization(v) => v.epoch(),
+            LegacyActivity::ConflictingNotarize(v) => v.epoch(),
+            LegacyActivity::ConflictingFinalize(v) => v.epoch(),
+            LegacyActivity::NullifyFinalize(v) => v.epoch(),
+        }
+    }
+}
+
+impl<V, D, G> Viewable for LegacyActivity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
+    type View = View;
+
+    fn view(&self) -> View {
+        match self {
+            LegacyActivity::Notarize(v) => v.view(),
+            LegacyActivity::Notarization(v) => v.view(),
+            LegacyActivity::Nullify(v) => v.view(),
+            LegacyActivity::Nullification(v) => v.view(),
+            LegacyActivity::Finalize(v) => v.view(),
+            LegacyActivity::Finalization(v) => v.view(),
+            LegacyActivity::ConflictingNotarize(v) => v.view(),
+            LegacyActivity::ConflictingFinalize(v) => v.view(),
+            LegacyActivity::NullifyFinalize(v) => v.view(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
+    Notarize(signing::Notarize<G, D>),
+    Notarization(signing::Notarization<G, D>),
+    Nullify(signing::Nullify<G>),
+    Nullification(signing::Nullification<G>),
+    Finalize(signing::Finalize<G, D>),
+    Finalization(signing::Finalization<G, D>),
+    ConflictingNotarize(ConflictingNotarize<V, D>),
+    ConflictingFinalize(ConflictingFinalize<V, D>),
+    NullifyFinalize(NullifyFinalize<V, D>),
+}
+
+impl<V, D, G> Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
+    pub fn verified(&self) -> bool {
+        matches!(
+            self,
+            Activity::Notarization(_) | Activity::Nullification(_) | Activity::Finalization(_)
+        )
+    }
+}
+
+impl<V, D, G> From<LegacyActivity<V, D, G>> for Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
+    fn from(activity: LegacyActivity<V, D, G>) -> Self {
+        match activity {
+            LegacyActivity::Notarize(v) => {
+                let signer = v.proposal_signature.index;
+                let proposal_signature = v.proposal_signature.value;
+                let seed_signature = v.seed_signature.value;
+                let proposal = v.proposal;
+                Activity::Notarize(signing::Notarize {
+                    proposal,
+                    vote: Vote {
+                        signer,
+                        signature: (proposal_signature, seed_signature),
+                    },
+                })
+            }
+            LegacyActivity::Notarization(v) => Activity::Notarization(v),
+            LegacyActivity::Nullify(v) => {
+                let signer = v.view_signature.index;
+                let view_signature = v.view_signature.value;
+                let seed_signature = v.seed_signature.value;
+                let round = v.round;
+                Activity::Nullify(signing::Nullify {
+                    round,
+                    vote: Vote {
+                        signer,
+                        signature: (view_signature, seed_signature),
+                    },
+                })
+            }
+            LegacyActivity::Nullification(v) => Activity::Nullification(v),
+            LegacyActivity::Finalize(v) => {
+                let signer = v.proposal_signature.index;
+                let proposal_signature = v.proposal_signature.value;
+                let seed_signature = v.seed_signature.value;
+                let proposal = v.proposal;
+                Activity::Finalize(signing::Finalize {
+                    proposal,
+                    vote: Vote {
+                        signer,
+                        signature: (proposal_signature, seed_signature),
+                    },
+                })
+            }
+            LegacyActivity::Finalization(v) => Activity::Finalization(v),
+            LegacyActivity::ConflictingNotarize(v) => Activity::ConflictingNotarize(v),
+            LegacyActivity::ConflictingFinalize(v) => Activity::ConflictingFinalize(v),
+            LegacyActivity::NullifyFinalize(v) => Activity::NullifyFinalize(v),
+        }
+    }
+}
+
+impl<V, D, G> From<Activity<V, D, G>> for LegacyActivity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+{
+    fn from(activity: Activity<V, D, G>) -> Self {
+        match activity {
+            Activity::Notarize(v) => LegacyActivity::Notarize(LegacyNotarize::from_signing::<G>(v)),
+            Activity::Notarization(v) => LegacyActivity::Notarization(v),
+            Activity::Nullify(v) => LegacyActivity::Nullify(LegacyNullify::from_signing::<G>(v)),
+            Activity::Nullification(v) => LegacyActivity::Nullification(v),
+            Activity::Finalize(v) => LegacyActivity::Finalize(LegacyFinalize::from_signing::<G>(v)),
+            Activity::Finalization(v) => LegacyActivity::Finalization(v),
+            Activity::ConflictingNotarize(v) => LegacyActivity::ConflictingNotarize(v),
+            Activity::ConflictingFinalize(v) => LegacyActivity::ConflictingFinalize(v),
+            Activity::NullifyFinalize(v) => LegacyActivity::NullifyFinalize(v),
+        }
+    }
+}
+
+impl<V, D, G> EncodeSize for Activity<V, D, G>
+where
+    V: Variant,
+    D: Digest,
+    G: SigningScheme,
+{
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Activity::Notarize(v) => v.encode_size(),
+            Activity::Notarization(v) => v.encode_size(),
+            Activity::Nullify(v) => v.encode_size(),
+            Activity::Nullification(v) => v.encode_size(),
+            Activity::Finalize(v) => v.encode_size(),
+            Activity::Finalization(v) => v.encode_size(),
+            Activity::ConflictingNotarize(v) => v.encode_size(),
+            Activity::ConflictingFinalize(v) => v.encode_size(),
+            Activity::NullifyFinalize(v) => v.encode_size(),
         }
     }
 }
@@ -2491,7 +3187,6 @@ where
     V: Variant,
     D: Digest,
     G: SigningScheme,
-    G::Certificate: Write,
 {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
@@ -2535,76 +3230,26 @@ where
     }
 }
 
-impl<V, D, G> EncodeSize for Activity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme,
-    G::Certificate: EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Activity::Notarize(v) => v.encode_size(),
-            Activity::Notarization(v) => v.encode_size(),
-            Activity::Nullify(v) => v.encode_size(),
-            Activity::Nullification(v) => v.encode_size(),
-            Activity::Finalize(v) => v.encode_size(),
-            Activity::Finalization(v) => v.encode_size(),
-            Activity::ConflictingNotarize(v) => v.encode_size(),
-            Activity::ConflictingFinalize(v) => v.encode_size(),
-            Activity::NullifyFinalize(v) => v.encode_size(),
-        }
-    }
-}
-
 impl<V, D, G> Read for Activity<V, D, G>
 where
     V: Variant,
     D: Digest,
     G: SigningScheme,
-    G::Certificate: Read<Cfg = G::CertificateReadCfg>,
 {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
-            0 => {
-                let v = Notarize::<V, D>::read(reader)?;
-                Ok(Activity::Notarize(v))
-            }
-            1 => {
-                let v = signing::Notarization::<G, D>::read(reader)?;
-                Ok(Activity::Notarization(v))
-            }
-            2 => {
-                let v = Nullify::<V>::read(reader)?;
-                Ok(Activity::Nullify(v))
-            }
-            3 => {
-                let v = signing::Nullification::<G>::read(reader)?;
-                Ok(Activity::Nullification(v))
-            }
-            4 => {
-                let v = Finalize::<V, D>::read(reader)?;
-                Ok(Activity::Finalize(v))
-            }
-            5 => {
-                let v = signing::Finalization::<G, D>::read(reader)?;
-                Ok(Activity::Finalization(v))
-            }
-            6 => {
-                let v = ConflictingNotarize::<V, D>::read(reader)?;
-                Ok(Activity::ConflictingNotarize(v))
-            }
-            7 => {
-                let v = ConflictingFinalize::<V, D>::read(reader)?;
-                Ok(Activity::ConflictingFinalize(v))
-            }
-            8 => {
-                let v = NullifyFinalize::<V, D>::read(reader)?;
-                Ok(Activity::NullifyFinalize(v))
-            }
+            0 => Ok(Activity::Notarize(signing::Notarize::<G, D>::read(reader)?)),
+            1 => Ok(Activity::Notarization(signing::Notarization::<G, D>::read(reader)?)),
+            2 => Ok(Activity::Nullify(signing::Nullify::<G>::read(reader)?)),
+            3 => Ok(Activity::Nullification(signing::Nullification::<G>::read(reader)?)),
+            4 => Ok(Activity::Finalize(signing::Finalize::<G, D>::read(reader)?)),
+            5 => Ok(Activity::Finalization(signing::Finalization::<G, D>::read(reader)?)),
+            6 => Ok(Activity::ConflictingNotarize(ConflictingNotarize::<V, D>::read(reader)?)),
+            7 => Ok(Activity::ConflictingFinalize(ConflictingFinalize::<V, D>::read(reader)?)),
+            8 => Ok(Activity::NullifyFinalize(NullifyFinalize::<V, D>::read(reader)?)),
             _ => Err(Error::Invalid(
                 "consensus::threshold_simplex::Activity",
                 "Invalid type",
@@ -2623,11 +3268,11 @@ where
 
     fn epoch(&self) -> Epoch {
         match self {
-            Activity::Notarize(v) => v.epoch(),
+            Activity::Notarize(v) => v.proposal.round.epoch(),
             Activity::Notarization(v) => v.epoch(),
-            Activity::Nullify(v) => v.epoch(),
+            Activity::Nullify(v) => v.round.epoch(),
             Activity::Nullification(v) => v.epoch(),
-            Activity::Finalize(v) => v.epoch(),
+            Activity::Finalize(v) => v.proposal.round.epoch(),
             Activity::Finalization(v) => v.epoch(),
             Activity::ConflictingNotarize(v) => v.epoch(),
             Activity::ConflictingFinalize(v) => v.epoch(),
@@ -2646,11 +3291,11 @@ where
 
     fn view(&self) -> View {
         match self {
-            Activity::Notarize(v) => v.view(),
+            Activity::Notarize(v) => v.proposal.view(),
             Activity::Notarization(v) => v.view(),
-            Activity::Nullify(v) => v.view(),
+            Activity::Nullify(v) => v.round.view(),
             Activity::Nullification(v) => v.view(),
-            Activity::Finalize(v) => v.view(),
+            Activity::Finalize(v) => v.proposal.view(),
             Activity::Finalization(v) => v.view(),
             Activity::ConflictingNotarize(v) => v.view(),
             Activity::ConflictingFinalize(v) => v.view(),

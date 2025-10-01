@@ -3,12 +3,15 @@ use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
-use commonware_consensus::threshold_simplex::{self, Engine};
+use commonware_consensus::threshold_simplex::{self, Engine, signing::BlsThresholdScheme};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        poly::{Poly, Public},
-        variant::{MinSig, Variant},
+    bls12381::{
+        dkg::ops::evaluate_all,
+        primitives::{
+            group,
+            poly::{Poly, Public},
+            variant::{MinSig, Variant},
+        },
     },
     ed25519, PrivateKeyExt as _, Sha256, Signer as _,
 };
@@ -205,6 +208,16 @@ fn main() {
             256, // 256 messages in flight
         );
 
+        // Prepare signing scheme for threshold simplex
+        let scheme_identity = identity.constant().clone();
+        let evaluations = evaluate_all::<MinSig>(&identity, validators.len() as u32);
+        let signing_scheme = BlsThresholdScheme::new(
+            evaluations,
+            scheme_identity,
+            share.clone(),
+            threshold,
+        );
+
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let (application, supervisor, mailbox) = application::Application::new(
@@ -231,6 +244,7 @@ fn main() {
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
                 supervisor,
+                signing: signing_scheme,
                 partition: String::from("log"),
                 mailbox_size: 1024,
                 epoch: 0,

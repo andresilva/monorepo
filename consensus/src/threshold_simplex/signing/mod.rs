@@ -215,6 +215,26 @@ where
     S: SigningScheme,
     D: Digest,
 {
+    pub fn proposal(&self) -> &Proposal<D> {
+        &self.proposal
+    }
+
+    pub fn vote(&self) -> &Vote<S> {
+        &self.vote
+    }
+
+    pub fn signature(&self) -> &S::Signature {
+        &self.vote.signature
+    }
+
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal.view()
+    }
+
     pub fn signer(&self) -> S::SignerId
     where
         S::SignerId: Clone,
@@ -273,6 +293,22 @@ impl<S> Nullify<S>
 where
     S: SigningScheme,
 {
+    pub fn vote(&self) -> &Vote<S> {
+        &self.vote
+    }
+
+    pub fn signature(&self) -> &S::Signature {
+        &self.vote.signature
+    }
+
+    pub fn round(&self) -> Round {
+        self.round
+    }
+
+    pub fn view(&self) -> View {
+        self.round.view()
+    }
+
     pub fn signer(&self) -> S::SignerId
     where
         S::SignerId: Clone,
@@ -335,6 +371,26 @@ where
     S: SigningScheme,
     D: Digest,
 {
+    pub fn proposal(&self) -> &Proposal<D> {
+        &self.proposal
+    }
+
+    pub fn vote(&self) -> &Vote<S> {
+        &self.vote
+    }
+
+    pub fn signature(&self) -> &S::Signature {
+        &self.vote.signature
+    }
+
+    pub fn round(&self) -> Round {
+        self.proposal.round
+    }
+
+    pub fn view(&self) -> View {
+        self.proposal.view()
+    }
+
     pub fn signer(&self) -> S::SignerId
     where
         S::SignerId: Clone,
@@ -397,6 +453,14 @@ where
     S: SigningScheme,
     D: Digest,
 {
+    pub fn proposal(&self) -> &Proposal<D> {
+        &self.proposal
+    }
+
+    pub fn certificate(&self) -> &S::Certificate {
+        &self.certificate
+    }
+
     pub fn round(&self) -> Round {
         self.proposal.round
     }
@@ -457,6 +521,10 @@ impl<S> Nullification<S>
 where
     S: SigningScheme,
 {
+    pub fn certificate(&self) -> &S::Certificate {
+        &self.certificate
+    }
+
     pub fn round(&self) -> Round {
         self.round
     }
@@ -505,13 +573,13 @@ where
             let randomness = scheme.verify_certificate::<D>(
                 VoteContext::Notarize {
                     namespace,
-                    proposal: &notarization.proposal,
+                    proposal: notarization.proposal(),
                 },
-                &notarization.certificate,
+                notarization.certificate(),
             )?;
 
             if let Some(randomness) = randomness {
-                let view = notarization.proposal.view();
+                let view = notarization.view();
                 if let Some(previous) = seeds.get(&view) {
                     if previous != &randomness {
                         return Err(Error::RandomnessMismatch { view });
@@ -526,13 +594,13 @@ where
             let randomness = scheme.verify_certificate::<D>(
                 VoteContext::Nullify {
                     namespace,
-                    round: nullification.round,
+                    round: nullification.round(),
                 },
-                &nullification.certificate,
+                nullification.certificate(),
             )?;
 
             if let Some(randomness) = randomness {
-                let view = nullification.round.view();
+                let view = nullification.view();
                 if let Some(previous) = seeds.get(&view) {
                     if previous != &randomness {
                         return Err(Error::RandomnessMismatch { view });
@@ -668,6 +736,14 @@ where
     S: SigningScheme,
     D: Digest,
 {
+    pub fn proposal(&self) -> &Proposal<D> {
+        &self.proposal
+    }
+
+    pub fn certificate(&self) -> &S::Certificate {
+        &self.certificate
+    }
+
     pub fn round(&self) -> Round {
         self.proposal.round
     }
@@ -683,13 +759,36 @@ where
 
 /// Trait that signing schemes must implement.
 pub trait SigningScheme: Clone + Send + Sync + 'static {
-    type SignerId: Clone + Ord;
-    type Signature: Clone;
-    type Certificate: Clone + Debug + PartialEq + Eq + Hash;
+    type SignerId: Clone
+        + Ord
+        + PartialEq
+        + Eq
+        + EncodeSize
+        + Write
+        + Read<Cfg = ()>
+        + Send
+        + Sync;
+    type SignatureReadCfg: Clone + Send + Sync + 'static;
+    type CertificateReadCfg: Clone + Send + Sync + 'static;
+    type Signature: Clone
+        + PartialEq
+        + Eq
+        + EncodeSize
+        + Write
+        + Read<Cfg = Self::SignatureReadCfg>
+        + Send
+        + Sync;
+    type Certificate: Clone
+        + Debug
+        + PartialEq
+        + Eq
+        + Hash
+        + EncodeSize
+        + Write
+        + Read<Cfg = Self::CertificateReadCfg>
+        + Send
+        + Sync;
     type Randomness;
-
-    type SignatureReadCfg;
-    type CertificateReadCfg;
 
     fn sign_vote<D: Digest>(
         &self,

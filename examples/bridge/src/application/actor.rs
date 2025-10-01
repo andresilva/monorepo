@@ -196,15 +196,17 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let view = activity.view();
                     match activity {
                         Activity::Notarization(notarization) => {
-                            let notarization = LegacyNotarization::from_signing::<
-                                BlsThresholdScheme<MinSig>,
-                            >(notarization);
+                            let notarization: LegacyNotarization<MinSig, H::Digest> =
+                                LegacyNotarization::from_signing::<
+                                    BlsThresholdScheme<MinSig>,
+                                >(notarization);
                             info!(view, payload = ?notarization.proposal.payload, signature=?notarization.proposal_signature, seed=?notarization.seed_signature, "notarized");
                         }
                         Activity::Finalization(finalization) => {
-                            let finalization = LegacyFinalization::from_signing::<
-                                BlsThresholdScheme<MinSig>,
-                            >(finalization);
+                            let finalization: LegacyFinalization<MinSig, H::Digest> =
+                                LegacyFinalization::from_signing::<
+                                    BlsThresholdScheme<MinSig>,
+                                >(finalization);
                             info!(view, payload = ?finalization.proposal.payload, signature=?finalization.proposal_signature, seed=?finalization.seed_signature, "finalized");
 
                             // Post finalization
@@ -230,7 +232,12 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                             debug!(view, success, "finalization posted");
                         }
                         Activity::Nullification(nullification) => {
-                            info!(view, signature=?nullification.view_signature, seed=?nullification.seed_signature, "nullified");
+                            info!(
+                                view,
+                                round = ?nullification.round(),
+                                certificate = ?nullification.certificate(),
+                                "nullified"
+                            );
                         }
                         _ => {}
                     }

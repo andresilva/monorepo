@@ -1,4 +1,4 @@
-use crate::{threshold_simplex::types::Voter, types::View};
+use crate::{threshold_simplex::types::LegacyVoter, types::View};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
@@ -13,7 +13,7 @@ pub enum Message<P: PublicKey, V: Variant, D: Digest> {
 
         active: oneshot::Sender<bool>,
     },
-    Constructed(Voter<V, D>),
+    Constructed(LegacyVoter<V, D>),
 }
 
 #[derive(Clone)]
@@ -40,7 +40,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Mailbox<P, V, D> {
         active_receiver.await.unwrap()
     }
 
-    pub async fn constructed(&mut self, message: Voter<V, D>) {
+    pub async fn constructed(&mut self, message: LegacyVoter<V, D>) {
         self.sender
             .send(Message::Constructed(message))
             .await
