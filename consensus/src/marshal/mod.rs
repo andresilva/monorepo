@@ -82,9 +82,7 @@ mod tests {
                 BlsThresholdScheme, Finalization as SigningFinalization,
                 Notarization as SigningNotarization,
             },
-            types::{
-                finalize_namespace, notarize_namespace, seed_namespace, Activity, Proposal,
-            },
+            types::{finalize_namespace, notarize_namespace, seed_namespace, Activity, Proposal},
         },
         types::Round,
         Block as _, Reporter,
@@ -447,9 +445,7 @@ mod tests {
                         || context.gen_bool(0.2)
                     // 20% chance to finalize randomly
                     {
-                        actor
-                            .report(Activity::Finalization(fin.clone()))
-                            .await;
+                        actor.report(Activity::Finalization(fin.clone())).await;
                     }
                 }
             }
@@ -517,14 +513,10 @@ mod tests {
                 payload: commitment,
             };
             let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
-            actor
-                .report(Activity::Notarization(notarization))
-                .await;
+            actor.report(Activity::Notarization(notarization)).await;
 
             let finalization = make_finalization(proposal, &shares, QUORUM);
-            actor
-                .report(Activity::Finalization(finalization))
-                .await;
+            actor.report(Activity::Finalization(finalization)).await;
 
             let received_block = subscription_rx.await.unwrap();
             assert_eq!(received_block.digest(), block.digest());
@@ -583,14 +575,10 @@ mod tests {
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
-                actor
-                    .report(Activity::Notarization(notarization))
-                    .await;
+                actor.report(Activity::Notarization(notarization)).await;
 
                 let finalization = make_finalization(proposal, &shares, QUORUM);
-                actor
-                    .report(Activity::Finalization(finalization))
-                    .await;
+                actor.report(Activity::Finalization(finalization)).await;
             }
 
             let received1_sub1 = sub1_rx.await.unwrap();
@@ -656,14 +644,10 @@ mod tests {
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
-                actor
-                    .report(Activity::Notarization(notarization))
-                    .await;
+                actor.report(Activity::Notarization(notarization)).await;
 
                 let finalization = make_finalization(proposal, &shares, QUORUM);
-                actor
-                    .report(Activity::Finalization(finalization))
-                    .await;
+                actor.report(Activity::Finalization(finalization)).await;
             }
 
             let received2 = sub2_rx.await.unwrap();
@@ -734,9 +718,7 @@ mod tests {
                 payload: block3.digest(),
             };
             let notarization3 = make_notarization(proposal3.clone(), &shares, QUORUM);
-            actor
-                .report(Activity::Notarization(notarization3))
-                .await;
+            actor.report(Activity::Notarization(notarization3)).await;
             actor.verified(Round::from((0, 3)), block3.clone()).await;
 
             // Block3: delivered
@@ -754,9 +736,7 @@ mod tests {
                 &shares,
                 QUORUM,
             );
-            actor
-                .report(Activity::Finalization(finalization4))
-                .await;
+            actor.report(Activity::Finalization(finalization4)).await;
             actor.verified(Round::from((0, 4)), block4.clone()).await;
 
             // Block4: delivered
@@ -815,9 +795,7 @@ mod tests {
                 payload: digest,
             };
             let finalization = make_finalization(proposal, &shares, QUORUM);
-            actor
-                .report(Activity::Finalization(finalization))
-                .await;
+            actor.report(Activity::Finalization(finalization)).await;
 
             // Latest should now be the finalized block
             assert_eq!(actor.get_info(Identifier::Latest).await, Some((1, digest)));
@@ -874,9 +852,7 @@ mod tests {
                 &shares,
                 QUORUM,
             );
-            actor
-                .report(Activity::Finalization(f1))
-                .await;
+            actor.report(Activity::Finalization(f1)).await;
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((1, d1)));
 
@@ -892,9 +868,7 @@ mod tests {
                 &shares,
                 QUORUM,
             );
-            actor
-                .report(Activity::Finalization(f2))
-                .await;
+            actor.report(Activity::Finalization(f2)).await;
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((2, d2)));
 
@@ -910,9 +884,7 @@ mod tests {
                 &shares,
                 QUORUM,
             );
-            actor
-                .report(Activity::Finalization(f3))
-                .await;
+            actor.report(Activity::Finalization(f3)).await;
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((3, d3)));
         })
@@ -953,9 +925,7 @@ mod tests {
                 payload: commitment,
             };
             let finalization = make_finalization(proposal, &shares, QUORUM);
-            actor
-                .report(Activity::Finalization(finalization))
-                .await;
+            actor.report(Activity::Finalization(finalization)).await;
 
             // Get by height
             let by_height = actor.get_block(1).await.expect("missing block by height");
@@ -1018,9 +988,7 @@ mod tests {
                 payload: fin_commitment,
             };
             let finalization = make_finalization(proposal, &shares, QUORUM);
-            actor
-                .report(Activity::Finalization(finalization))
-                .await;
+            actor.report(Activity::Finalization(finalization)).await;
             let got = actor
                 .get_block(&fin_commitment)
                 .await

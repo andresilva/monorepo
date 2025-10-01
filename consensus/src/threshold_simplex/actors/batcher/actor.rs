@@ -109,7 +109,7 @@ where
             reporter,
             supervisor,
             signing,
-            verifier: BatchVerifier::new(quorum, Some(signing_clone)),
+            verifier: BatchVerifier::<V, D, G>::new(quorum, Some(signing_clone)),
 
             notarizes: vec![None; participants],
             nullifies: vec![None; participants],

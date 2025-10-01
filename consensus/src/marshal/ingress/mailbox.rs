@@ -274,10 +274,8 @@ where
 
     async fn report(&mut self, activity: Self::Activity) {
         let message: Message<B, G> = match activity {
-            Activity::Notarization(notarization) =>
-                Message::Notarization { notarization },
-            Activity::Finalization(finalization) =>
-                Message::Finalization { finalization },
+            Activity::Notarization(notarization) => Message::Notarization { notarization },
+            Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {
                 // Ignore other activity types
                 return;

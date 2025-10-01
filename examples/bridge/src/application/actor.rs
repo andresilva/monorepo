@@ -12,11 +12,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     threshold_simplex::{
         signing::BlsThresholdScheme,
-        types::{
-            Activity,
-            Finalization as LegacyFinalization,
-            Notarization as LegacyNotarization,
-        },
+        types::{Activity, Finalization as LegacyFinalization, Notarization as LegacyNotarization},
     },
     Viewable,
 };

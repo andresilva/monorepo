@@ -23,8 +23,9 @@ use commonware_cryptography::{
 };
 use commonware_utils::union;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
+    marker::PhantomData,
 };
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -129,17 +130,18 @@ pub struct BatchVerifier<
     leader: Option<u32>,
     leader_proposal: Option<Proposal<D>>,
 
-    notarizes: Vec<Notarize<V, D>>,
+    notarizes: Vec<signing::Notarize<G, D>>,
     notarizes_force: bool,
     notarizes_verified: usize,
 
-    nullifies: Vec<Nullify<V>>,
+    nullifies: Vec<signing::Nullify<G>>,
     nullifies_verified: usize,
 
-    finalizes: Vec<Finalize<V, D>>,
+    finalizes: Vec<signing::Finalize<G, D>>,
     finalizes_verified: usize,
 
     signing: Option<G>,
+    _phantom: PhantomData<V>,
 }
 
 impl<
@@ -177,6 +179,7 @@ impl<
             finalizes_verified: 0,
 
             signing,
+            _phantom: PhantomData,
         }
     }
 
@@ -233,14 +236,31 @@ impl<
                 if verified {
                     self.notarizes_verified += 1;
                 } else {
-                    self.notarizes.push(notarize);
+                    let signing_notarize = signing::Notarize {
+                        proposal: notarize.proposal.clone(),
+                        vote: Vote {
+                            signer: notarize.signer(),
+                            signature: (
+                                notarize.proposal_signature.value,
+                                notarize.seed_signature.value,
+                            ),
+                        },
+                    };
+                    self.notarizes.push(signing_notarize);
                 }
             }
             Voter::Nullify(nullify) => {
                 if verified {
                     self.nullifies_verified += 1;
                 } else {
-                    self.nullifies.push(nullify);
+                    let signing_nullify = signing::Nullify {
+                        round: nullify.round,
+                        vote: Vote {
+                            signer: nullify.signer(),
+                            signature: (nullify.view_signature.value, nullify.seed_signature.value),
+                        },
+                    };
+                    self.nullifies.push(signing_nullify);
                 }
             }
             Voter::Finalize(finalize) => {
@@ -255,7 +275,17 @@ impl<
                 if verified {
                     self.finalizes_verified += 1;
                 } else {
-                    self.finalizes.push(finalize);
+                    let signing_finalize = signing::Finalize {
+                        proposal: finalize.proposal.clone(),
+                        vote: Vote {
+                            signer: finalize.signer(),
+                            signature: (
+                                finalize.proposal_signature.value,
+                                finalize.seed_signature.value,
+                            ),
+                        },
+                    };
+                    self.finalizes.push(signing_finalize);
                 }
             }
             Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
@@ -309,38 +339,76 @@ impl<
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         self.notarizes_force = false;
         let pending = std::mem::take(&mut self.notarizes);
-        let (mut notarizes, mut failed) = Notarize::verify_multiple(namespace, polynomial, pending);
 
-        if let (Some(signing), Some(first)) = (self.signing.as_ref(), notarizes.first()) {
-            let votes: Vec<Vote<G>> = notarizes
-                .iter()
-                .map(|notarize| Vote {
-                    signer: notarize.signer(),
-                    signature: (
-                        notarize.proposal_signature.value.clone(),
-                        notarize.seed_signature.value.clone(),
-                    ),
-                })
+        if pending.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        if let Some(signing) = self.signing.as_ref() {
+            let mut by_signer: BTreeMap<u32, Vec<signing::Notarize<G, D>>> = BTreeMap::new();
+            for notarize in pending {
+                by_signer
+                    .entry(notarize.signer())
+                    .or_default()
+                    .push(notarize);
+            }
+
+            let first_proposal = by_signer
+                .values()
+                .next()
+                .expect("notarize map must be non-empty")
+                .first()
+                .expect("notarize list must be non-empty")
+                .proposal
+                .clone();
+
+            let votes: Vec<Vote<G>> = by_signer
+                .values()
+                .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
                 .collect();
 
             let verification = signing.verify_votes::<D, _>(
                 VoteContext::Notarize {
                     namespace,
-                    proposal: &first.proposal,
+                    proposal: &first_proposal,
                 },
                 votes,
             );
 
-            if !verification.invalid_signers.is_empty() {
-                let invalid: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+            let mut verified = Vec::new();
 
-                if !invalid.is_empty() {
-                    notarizes.retain(|notarize| !invalid.contains(&notarize.signer()));
-                    failed.extend(invalid.into_iter());
+            for vote in verification.verified {
+                let signer = vote.signer.clone();
+                if let Some(entries) = by_signer.get_mut(&signer) {
+                    if let Some(mut notarize) = entries.pop() {
+                        notarize.vote = vote;
+                        verified.push(notarize);
+                    }
+                    if entries.is_empty() {
+                        by_signer.remove(&signer);
+                    }
                 }
             }
+
+            let mut failed: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+            failed.extend(by_signer.into_keys());
+
+            self.notarizes_verified += verified.len();
+
+            let voters = verified
+                .into_iter()
+                .map(|notarize| Voter::Notarize(Notarize::from_signing::<G>(notarize)))
+                .collect();
+
+            return (voters, failed.into_iter().collect());
         }
 
+        // Fallback to legacy verification when no signing scheme is available.
+        let pending_legacy: Vec<Notarize<V, D>> = pending
+            .into_iter()
+            .map(Notarize::from_signing::<G>)
+            .collect();
+        let (notarizes, failed) = Notarize::verify_multiple(namespace, polynomial, pending_legacy);
         self.notarizes_verified += notarizes.len();
         (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
     }
@@ -414,38 +482,71 @@ impl<
         polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let pending = std::mem::take(&mut self.nullifies);
-        let (mut nullifies, mut failed) = Nullify::verify_multiple(namespace, polynomial, pending);
 
-        if let (Some(signing), Some(first)) = (self.signing.as_ref(), nullifies.first()) {
-            let votes: Vec<Vote<G>> = nullifies
-                .iter()
-                .map(|nullify| Vote {
-                    signer: nullify.signer(),
-                    signature: (
-                        nullify.view_signature.value.clone(),
-                        nullify.seed_signature.value.clone(),
-                    ),
-                })
+        if pending.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        if let Some(signing) = self.signing.as_ref() {
+            let mut by_signer: BTreeMap<u32, Vec<signing::Nullify<G>>> = BTreeMap::new();
+            for nullify in pending {
+                by_signer.entry(nullify.signer()).or_default().push(nullify);
+            }
+
+            let first_round = by_signer
+                .values()
+                .next()
+                .expect("nullify map must be non-empty")
+                .first()
+                .expect("nullify list must be non-empty")
+                .round;
+
+            let votes: Vec<Vote<G>> = by_signer
+                .values()
+                .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
                 .collect();
 
             let verification = signing.verify_votes::<D, _>(
                 VoteContext::Nullify {
                     namespace,
-                    round: first.round,
+                    round: first_round,
                 },
                 votes,
             );
 
-            if !verification.invalid_signers.is_empty() {
-                let invalid: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+            let mut verified = Vec::new();
 
-                if !invalid.is_empty() {
-                    nullifies.retain(|nullify| !invalid.contains(&nullify.signer()));
-                    failed.extend(invalid.into_iter());
+            for vote in verification.verified {
+                let signer = vote.signer.clone();
+                if let Some(entries) = by_signer.get_mut(&signer) {
+                    if let Some(mut nullify) = entries.pop() {
+                        nullify.vote = vote;
+                        verified.push(nullify);
+                    }
+                    if entries.is_empty() {
+                        by_signer.remove(&signer);
+                    }
                 }
             }
+
+            let mut failed: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+            failed.extend(by_signer.into_keys());
+
+            self.nullifies_verified += verified.len();
+
+            let voters = verified
+                .into_iter()
+                .map(|nullify| Voter::Nullify(Nullify::from_signing::<G>(nullify)))
+                .collect();
+
+            return (voters, failed.into_iter().collect());
         }
 
+        let pending_legacy: Vec<Nullify<V>> = pending
+            .into_iter()
+            .map(Nullify::from_signing::<G>)
+            .collect();
+        let (nullifies, failed) = Nullify::verify_multiple(namespace, polynomial, pending_legacy);
         self.nullifies_verified += nullifies.len();
         (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
     }
@@ -504,38 +605,75 @@ impl<
         polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let pending = std::mem::take(&mut self.finalizes);
-        let (mut finalizes, mut failed) = Finalize::verify_multiple(namespace, polynomial, pending);
 
-        if let (Some(signing), Some(first)) = (self.signing.as_ref(), finalizes.first()) {
-            let votes: Vec<Vote<G>> = finalizes
-                .iter()
-                .map(|finalize| Vote {
-                    signer: finalize.signer(),
-                    signature: (
-                        finalize.proposal_signature.value.clone(),
-                        finalize.seed_signature.value.clone(),
-                    ),
-                })
+        if pending.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        if let Some(signing) = self.signing.as_ref() {
+            let mut by_signer: BTreeMap<u32, Vec<signing::Finalize<G, D>>> = BTreeMap::new();
+            for finalize in pending {
+                by_signer
+                    .entry(finalize.signer())
+                    .or_default()
+                    .push(finalize);
+            }
+
+            let first_proposal = by_signer
+                .values()
+                .next()
+                .expect("finalize map must be non-empty")
+                .first()
+                .expect("finalize list must be non-empty")
+                .proposal
+                .clone();
+
+            let votes: Vec<Vote<G>> = by_signer
+                .values()
+                .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
                 .collect();
 
             let verification = signing.verify_votes::<D, _>(
                 VoteContext::Finalize {
                     namespace,
-                    proposal: &first.proposal,
+                    proposal: &first_proposal,
                 },
                 votes,
             );
 
-            if !verification.invalid_signers.is_empty() {
-                let invalid: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+            let mut verified = Vec::new();
 
-                if !invalid.is_empty() {
-                    finalizes.retain(|finalize| !invalid.contains(&finalize.signer()));
-                    failed.extend(invalid.into_iter());
+            for vote in verification.verified {
+                let signer = vote.signer.clone();
+                if let Some(entries) = by_signer.get_mut(&signer) {
+                    if let Some(mut finalize) = entries.pop() {
+                        finalize.vote = vote;
+                        verified.push(finalize);
+                    }
+                    if entries.is_empty() {
+                        by_signer.remove(&signer);
+                    }
                 }
             }
+
+            let mut failed: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
+            failed.extend(by_signer.into_keys());
+
+            self.finalizes_verified += verified.len();
+
+            let voters = verified
+                .into_iter()
+                .map(|finalize| Voter::Finalize(Finalize::from_signing::<G>(finalize)))
+                .collect();
+
+            return (voters, failed.into_iter().collect());
         }
 
+        let pending_legacy: Vec<Finalize<V, D>> = pending
+            .into_iter()
+            .map(Finalize::from_signing::<G>)
+            .collect();
+        let (finalizes, failed) = Finalize::verify_multiple(namespace, polynomial, pending_legacy);
         self.finalizes_verified += finalizes.len();
         (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
     }
@@ -916,6 +1054,30 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
             partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &seed_message);
         Notarize::new(proposal, proposal_signature, seed_signature)
     }
+
+    /// Convert a signing-module notarize into the legacy representation.
+    pub fn from_signing<S>(notarize: signing::Notarize<S, D>) -> Self
+    where
+        S: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        let signer = notarize.signer();
+        let (proposal_signature, seed_signature) = notarize.vote.signature;
+        Notarize {
+            proposal: notarize.proposal,
+            proposal_signature: PartialSignature::<V> {
+                index: signer,
+                value: proposal_signature,
+            },
+            seed_signature: PartialSignature::<V> {
+                index: signer,
+                value: seed_signature,
+            },
+        }
+    }
 }
 
 impl<V: Variant, D: Digest> Attributable for Notarize<V, D> {
@@ -1261,6 +1423,30 @@ impl<V: Variant> Nullify<V> {
         let seed_signature = partial_sign_message::<V>(share, Some(&ns), &msg);
         Nullify::new(round, view_signature, seed_signature)
     }
+
+    /// Convert a signing-module nullify into the legacy representation.
+    pub fn from_signing<S>(nullify: signing::Nullify<S>) -> Self
+    where
+        S: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        let signer = nullify.signer();
+        let (view_signature, seed_signature) = nullify.vote.signature;
+        Nullify {
+            round: nullify.round,
+            view_signature: PartialSignature::<V> {
+                index: signer,
+                value: view_signature,
+            },
+            seed_signature: PartialSignature::<V> {
+                index: signer,
+                value: seed_signature,
+            },
+        }
+    }
 }
 
 impl<V: Variant> Attributable for Nullify<V> {
@@ -1601,6 +1787,30 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         let seed_signature =
             partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &seed_message);
         Finalize::new(proposal, proposal_signature, seed_signature)
+    }
+
+    /// Convert a signing-module finalize vote into the legacy representation.
+    pub fn from_signing<S>(finalize: signing::Finalize<S, D>) -> Self
+    where
+        S: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        let signer = finalize.signer();
+        let (proposal_signature, seed_signature) = finalize.vote.signature;
+        Finalize {
+            proposal: finalize.proposal,
+            proposal_signature: PartialSignature::<V> {
+                index: signer,
+                value: proposal_signature,
+            },
+            seed_signature: PartialSignature::<V> {
+                index: signer,
+                value: seed_signature,
+            },
+        }
     }
 }
 
@@ -3891,7 +4101,10 @@ mod tests {
         verifier.set_leader_proposal(finalize_s0_prop_a.proposal.clone());
         // Now, finalize_s1_propB should have been removed.
         assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes[0], finalize_s0_prop_a);
+        assert_eq!(
+            Finalize::from_signing::<BlsThresholdScheme<MinSig>>(verifier.finalizes[0].clone()),
+            finalize_s0_prop_a
+        );
         assert_eq!(verifier.finalizes_verified, 0);
 
         // Add finalize_s0_propA (verified)

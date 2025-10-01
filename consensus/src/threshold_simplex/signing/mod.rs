@@ -210,6 +210,19 @@ where
     }
 }
 
+impl<S, D> Notarize<S, D>
+where
+    S: SigningScheme,
+    D: Digest,
+{
+    pub fn signer(&self) -> S::SignerId
+    where
+        S::SignerId: Clone,
+    {
+        self.vote.signer.clone()
+    }
+}
+
 /// Partial nullify vote for a given round.
 #[derive(Clone)]
 pub struct Nullify<S: SigningScheme> {
@@ -253,6 +266,18 @@ where
         let vote = Vote::read(reader)?;
 
         Ok(Self { round, vote })
+    }
+}
+
+impl<S> Nullify<S>
+where
+    S: SigningScheme,
+{
+    pub fn signer(&self) -> S::SignerId
+    where
+        S::SignerId: Clone,
+    {
+        self.vote.signer.clone()
     }
 }
 
@@ -305,6 +330,19 @@ where
     }
 }
 
+impl<S, D> Finalize<S, D>
+where
+    S: SigningScheme,
+    D: Digest,
+{
+    pub fn signer(&self) -> S::SignerId
+    where
+        S::SignerId: Clone,
+    {
+        self.vote.signer.clone()
+    }
+}
+
 /// Aggregated notarization certificate with randomness seed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
@@ -345,8 +383,7 @@ where
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
-        let certificate =
-            S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
         Ok(Self {
             proposal,
@@ -410,8 +447,7 @@ where
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let round = Round::read(reader)?;
-        let certificate =
-            S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
         Ok(Self { round, certificate })
     }
@@ -618,8 +654,7 @@ where
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
-        let certificate =
-            S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
         Ok(Self {
             proposal,

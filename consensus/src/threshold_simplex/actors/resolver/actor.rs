@@ -129,8 +129,8 @@ pub struct Actor<
     epoch: Epoch,
     namespace: Vec<u8>,
 
-    notarizations: BTreeMap<View, Notarization<V, D>>,
-    nullifications: BTreeMap<View, Nullification<V>>,
+    notarizations: BTreeMap<View, signing::Notarization<G, D>>,
+    nullifications: BTreeMap<View, signing::Nullification<G>>,
     activity_timeout: u64,
 
     required: BTreeSet<Entry>,
@@ -421,7 +421,8 @@ where
                             self.required.remove(&Entry { task: Task::Notarization, view });
 
                             // Add notarization to cache
-                            self.notarizations.insert(view, notarization);
+                            let signing = notarization.into_signing::<G>();
+                            self.notarizations.insert(view, signing);
                         }
                         Message::Nullified { nullification } => {
                             // Update current view
@@ -440,7 +441,8 @@ where
                             self.required.remove(&Entry { task: Task::Nullification, view });
 
                             // Add nullification to cache
-                            self.nullifications.insert(view, nullification);
+                            let signing = nullification.into_signing::<G>();
+                            self.nullifications.insert(view, signing);
                         }
                         Message::Finalized { view } => {
                             // Update current view
@@ -523,14 +525,8 @@ where
                             debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
                             let response = signing::Response::new(
                                 request.id,
-                                notarizations_found
-                                    .into_iter()
-                                    .map(|notarization| notarization.into_signing::<G>())
-                                    .collect(),
-                                nullifications_found
-                                    .into_iter()
-                                    .map(|nullification| nullification.into_signing::<G>())
-                                    .collect(),
+                                notarizations_found,
+                                nullifications_found,
                             );
                             let response = Backfiller::Response(response);
                             sender
@@ -582,8 +578,8 @@ where
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                let legacy = Notarization::from_signing::<G>(notarization);
-                                self.notarizations.insert(view, legacy.clone());
+                                let legacy = Notarization::from_signing::<G>(notarization.clone());
+                                self.notarizations.insert(view, notarization);
                                 voters.push(Voter::Notarization(legacy));
                                 notarizations_found.insert(view);
                             }
@@ -595,8 +591,8 @@ where
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                let legacy = Nullification::from_signing::<G>(nullification);
-                                self.nullifications.insert(view, legacy.clone());
+                                let legacy = Nullification::from_signing::<G>(nullification.clone());
+                                self.nullifications.insert(view, nullification);
                                 voters.push(Voter::Nullification(legacy));
                                 nullifications_found.insert(view);
                             }
