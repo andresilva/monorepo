@@ -1,4 +1,4 @@
-use super::{legacy, Config, Mailbox, Message};
+use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::{batcher, resolver},
@@ -8,7 +8,7 @@ use crate::{
         signing::{self, SigningScheme, Vote, VoteContext},
         types::{
             Activity, Attributable, Context, LegacyActivity, Finalization, Finalize, LegacyVoter, Notarization,
-            Notarize, Nullification, Nullify, Proposal,
+            Notarize, Nullification, Nullify, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -614,7 +614,7 @@ pub struct Actor<
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
     buffer_pool: PoolRef,
-    journal: Option<Journal<E, LegacyVoter<V, D>>>,
+    journal: Option<Journal<E, Voter<G, D>>>,
 
     genesis: Option<D>,
 
@@ -626,7 +626,7 @@ pub struct Actor<
     nullify_retry: Duration,
     activity_timeout: View,
 
-    mailbox_receiver: mpsc::Receiver<Message<V, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<G, D>>,
 
     view: View,
     views: BTreeMap<View, Round<E, C::PublicKey, V, D, S, G>>,
@@ -668,7 +668,7 @@ impl<
 where
     F: Reporter<Activity = Activity<V, D, G>>,
 {
-    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S, G>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S, G>) -> (Self, Mailbox<V, G, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -713,8 +713,8 @@ where
         );
 
         // Initialize store
-        let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = legacy::mailbox(mailbox_sender);
+        let (mailbox_sender, mailbox_receiver) = mpsc::channel::<Message<G, D>>(cfg.mailbox_size);
+        let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
                 context: context.clone(),
@@ -1027,16 +1027,6 @@ where
             Rnd::new(self.epoch, view),
         ));
 
-        // Handle nullify
-        if self.journal.is_some() {
-            let msg = LegacyVoter::Nullify(nullify.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append nullify");
-        }
         let signer = nullify.signer();
         let round_value = nullify.round;
         let view_signature = nullify.view_signature.value;
@@ -1048,6 +1038,13 @@ where
                 signature: (view_signature, seed_signature),
             },
         };
+        if let Some(journal) = self.journal.as_mut() {
+            let msg = Voter::Nullify(signing_nullify.clone());
+            journal
+                .append(view, msg)
+                .await
+                .expect("unable to append nullify");
+        }
         round.add_verified_nullify(signing_nullify).await
     }
 
@@ -1301,16 +1298,6 @@ where
             Rnd::new(self.epoch, view),
         ));
 
-        // Handle notarize
-        if self.journal.is_some() {
-            let msg = LegacyVoter::Notarize(notarize.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
-        }
         let signer = notarize.signer();
         let proposal = notarize.proposal.clone();
         let proposal_signature = notarize.proposal_signature.value;
@@ -1322,6 +1309,13 @@ where
                 signature: (proposal_signature, seed_signature),
             },
         };
+        if let Some(journal) = self.journal.as_mut() {
+            let msg = Voter::Notarize(signing_notarize.clone());
+            journal
+                .append(view, msg)
+                .await
+                .expect("unable to append to journal");
+        }
         round.add_verified_notarize(signing_notarize).await;
     }
 
@@ -1388,15 +1382,15 @@ where
 
         // Store notarization
         let seed = legacy.seed_signature.clone();
-        let added = round.add_verified_notarization(signing_notarization);
-        if added && self.journal.is_some() {
-            let msg = LegacyVoter::Notarization(legacy.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
+        let added = round.add_verified_notarization(signing_notarization.clone());
+        if added {
+            if let Some(journal) = self.journal.as_mut() {
+                let msg = Voter::Notarization(signing_notarization);
+                journal
+                    .append(view, msg)
+                    .await
+                    .expect("unable to append to journal");
+            }
         }
 
         // Enter next view
@@ -1465,15 +1459,15 @@ where
 
         // Store nullification
         let seed = legacy.seed_signature.clone();
-        let added = round.add_verified_nullification(signing_nullification);
-        if added && self.journal.is_some() {
-            let msg = LegacyVoter::Nullification(legacy.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
+        let added = round.add_verified_nullification(signing_nullification.clone());
+        if added {
+            if let Some(journal) = self.journal.as_mut() {
+                let msg = Voter::Nullification(signing_nullification);
+                journal
+                    .append(view, msg)
+                    .await
+                    .expect("unable to append to journal");
+            }
         }
 
         // Enter next view
@@ -1492,15 +1486,6 @@ where
         ));
 
         // Handle finalize
-        if self.journal.is_some() {
-            let msg = LegacyVoter::Finalize(finalize.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
-        }
         let signer = finalize.signer();
         let proposal = finalize.proposal.clone();
         let proposal_signature = finalize.proposal_signature.value;
@@ -1512,6 +1497,13 @@ where
                 signature: (proposal_signature, seed_signature),
             },
         };
+        if let Some(journal) = self.journal.as_mut() {
+            let msg = Voter::Finalize(signing_finalize.clone());
+            journal
+                .append(view, msg)
+                .await
+                .expect("unable to append to journal");
+        }
         round.add_verified_finalize(signing_finalize).await
     }
 
@@ -1578,15 +1570,15 @@ where
 
         // Store finalization
         let seed = legacy.seed_signature.clone();
-        let added = round.add_verified_finalization(signing_finalization);
-        if added && self.journal.is_some() {
-            let msg = LegacyVoter::Finalization(legacy.clone());
-            self.journal
-                .as_mut()
-                .unwrap()
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
+        let added = round.add_verified_finalization(signing_finalization.clone());
+        if added {
+            if let Some(journal) = self.journal.as_mut() {
+                let msg = Voter::Finalization(signing_finalization);
+                journal
+                    .append(view, msg)
+                    .await
+                    .expect("unable to append to journal");
+            }
         }
 
         // Track view finalized
@@ -1953,7 +1945,7 @@ where
         self.enter_view(1, V::Signature::zero());
 
         // Initialize journal
-        let journal = Journal::<_, LegacyVoter<V, D>>::init(
+        let journal = Journal::<_, Voter<G, D>>::init(
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -1975,11 +1967,11 @@ where
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
-                let (_, _, _, msg) = msg.expect("unable to replay journal");
-                let view = msg.view();
-                match msg {
-                    LegacyVoter::Notarize(notarize) => {
-                        // Handle notarize
+                let (_, _, _, voter) = msg.expect("unable to replay journal");
+                let view = voter.view();
+                match voter {
+                    Voter::Notarize(signing_notarize) => {
+                        let notarize = Notarize::from_signing::<G>(signing_notarize.clone());
                         let public_key_index = notarize.signer();
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
@@ -1989,7 +1981,6 @@ where
                         let activity = Activity::from(LegacyActivity::Notarize(notarize));
                         self.reporter.report(activity).await;
 
-                        // Update round info
                         if me {
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.proposal = Some(proposal);
@@ -1999,21 +1990,22 @@ where
                             round.broadcast_notarize = true;
                         }
                     }
-                    LegacyVoter::Notarization(notarization) => {
-                        // Handle notarization
-                        let signing_notarization = notarization.clone().into_signing::<G>();
-                        self.handle_notarization(signing_notarization.clone(), notarization)
-                            .await;
+                    Voter::Notarization(signing_notarization) => {
+                        let notarization = Notarization::from_signing::<G>(signing_notarization.clone());
+                        self.handle_notarization(
+                            signing_notarization.clone(),
+                            notarization,
+                        )
+                        .await;
                         let activity =
                             Activity::from(LegacyActivity::Notarization(signing_notarization));
                         self.reporter.report(activity).await;
 
-                        // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
                         round.broadcast_notarization = true;
                     }
-                    LegacyVoter::Nullify(nullify) => {
-                        // Handle nullify
+                    Voter::Nullify(signing_nullify) => {
+                        let nullify = Nullify::from_signing::<G>(signing_nullify.clone());
                         let public_key_index = nullify.signer();
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
@@ -2022,27 +2014,27 @@ where
                         let activity = Activity::from(LegacyActivity::Nullify(nullify));
                         self.reporter.report(activity).await;
 
-                        // Update round info
                         if me {
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_nullify = true;
                         }
                     }
-                    LegacyVoter::Nullification(nullification) => {
-                        // Handle nullification
-                        let signing_nullification = nullification.clone().into_signing::<G>();
-                        self.handle_nullification(signing_nullification.clone(), nullification)
-                            .await;
+                    Voter::Nullification(signing_nullification) => {
+                        let nullification = Nullification::from_signing::<G>(signing_nullification.clone());
+                        self.handle_nullification(
+                            signing_nullification.clone(),
+                            nullification,
+                        )
+                        .await;
                         let activity =
                             Activity::from(LegacyActivity::Nullification(signing_nullification));
                         self.reporter.report(activity).await;
 
-                        // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
                         round.broadcast_nullification = true;
                     }
-                    LegacyVoter::Finalize(finalize) => {
-                        // Handle finalize
+                    Voter::Finalize(signing_finalize) => {
+                        let finalize = Finalize::from_signing::<G>(signing_finalize.clone());
                         let public_key_index = finalize.signer();
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
@@ -2051,24 +2043,22 @@ where
                         let activity = Activity::from(LegacyActivity::Finalize(finalize));
                         self.reporter.report(activity).await;
 
-                        // Update round info
-                        //
-                        // If we are sending a finalize message, we must be in the next view
                         if me {
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_finalize = true;
                         }
                     }
-                    LegacyVoter::Finalization(finalization) => {
-                        // Handle finalization
-                        let signing_finalization = finalization.clone().into_signing::<G>();
-                        self.handle_finalization(signing_finalization.clone(), finalization)
-                            .await;
+                    Voter::Finalization(signing_finalization) => {
+                        let finalization = Finalization::from_signing::<G>(signing_finalization.clone());
+                        self.handle_finalization(
+                            signing_finalization.clone(),
+                            finalization,
+                        )
+                        .await;
                         let activity =
                             Activity::from(LegacyActivity::Finalization(signing_finalization));
                         self.reporter.report(activity).await;
 
-                        // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
                         round.broadcast_finalization = true;
                     }
@@ -2255,29 +2245,29 @@ where
 
                     // Handle verifier and resolver
                     match msg {
-                        LegacyVoter::Notarize(notarize) => {
-                            self.handle_notarize(notarize).await;
+                        Voter::Notarize(notarize) => {
+                            self.handle_notarize(Notarize::from_signing::<G>(notarize)).await;
                         }
-                        LegacyVoter::Nullify(nullify) => {
-                            self.handle_nullify(nullify).await;
+                        Voter::Nullify(nullify) => {
+                            self.handle_nullify(Nullify::from_signing::<G>(nullify)).await;
                         }
-                        LegacyVoter::Finalize(finalize) => {
-                            self.handle_finalize(finalize).await;
+                        Voter::Finalize(finalize) => {
+                            self.handle_finalize(Finalize::from_signing::<G>(finalize)).await;
                         }
-                        LegacyVoter::Notarization(notarization) => {
+                        Voter::Notarization(notarization) => {
                             trace!(view, "received notarization from resolver");
-                            let signing_notarization = notarization.clone().into_signing::<G>();
-                            self.handle_notarization(signing_notarization, notarization)
-                                .await;
-                        },
-                        LegacyVoter::Nullification(nullification) => {
+                            let legacy = Notarization::from_signing::<G>(notarization.clone());
+                            self.handle_notarization(notarization, legacy).await;
+                        }
+                        Voter::Nullification(nullification) => {
                             trace!(view, "received nullification from resolver");
-                            let signing_nullification = nullification.clone().into_signing::<G>();
-                            self.handle_nullification(signing_nullification, nullification)
-                                .await;
-                        },
-                        LegacyVoter::Finalization(_) => {
-                            unreachable!("unexpected message type");
+                            let legacy = Nullification::from_signing::<G>(nullification.clone());
+                            self.handle_nullification(nullification, legacy).await;
+                        }
+                        Voter::Finalization(finalization) => {
+                            trace!(view, "received finalization from resolver");
+                            let legacy = Finalization::from_signing::<G>(finalization.clone());
+                            self.handle_finalization(finalization, legacy).await;
                         }
                     }
                 },

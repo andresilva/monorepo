@@ -1,58 +1,52 @@
-use crate::threshold_simplex::types::{LegacyVoter, Voter};
-use crate::threshold_simplex::signing::SigningScheme;
+use crate::threshold_simplex::{
+    signing::SigningScheme,
+    types::{LegacyVoter, Voter},
+};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use futures::{channel::mpsc, stream, SinkExt};
+use std::marker::PhantomData;
 
-// If either of these requests fails, it will not send a reply.
-pub enum MessageLegacy<V: Variant, D: Digest> {
-    Verified(LegacyVoter<V, D>),
-}
-
-#[derive(Clone)]
-pub struct MailboxLegacy<V: Variant, D: Digest> {
-    sender: mpsc::Sender<MessageLegacy<V, D>>,
-}
-
-impl<V: Variant, D: Digest> MailboxLegacy<V, D> {
-    pub fn new(sender: mpsc::Sender<MessageLegacy<V, D>>) -> Self {
-        Self { sender }
-    }
-
-    pub async fn verified(&mut self, voters: Vec<LegacyVoter<V, D>>) {
-        self.sender
-            .send_all(&mut stream::iter(
-                voters
-                    .into_iter()
-                    .map(|voter| Ok(MessageLegacy::Verified(voter))),
-            ))
-            .await
-            .expect("Failed to send batch of voters");
-    }
-}
-
-#[allow(dead_code)]
-pub enum MessageSigning<G: SigningScheme, D: Digest> {
+pub enum Message<G: SigningScheme, D: Digest> {
     Verified(Voter<G, D>),
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
-pub struct MailboxSigning<G: SigningScheme, D: Digest> {
-    sender: mpsc::Sender<MessageSigning<G, D>>,
+pub struct Mailbox<V: Variant, G: SigningScheme, D: Digest> {
+    sender: mpsc::Sender<Message<G, D>>,
+    _marker: PhantomData<V>,
 }
 
-#[allow(dead_code)]
-impl<G: SigningScheme, D: Digest> MailboxSigning<G, D> {
-    pub fn new(sender: mpsc::Sender<MessageSigning<G, D>>) -> Self {
-        Self { sender }
+impl<V, G, D> Mailbox<V, G, D>
+where
+    V: Variant,
+    G: SigningScheme<
+        SignerId = u32,
+        Signature = (V::Signature, V::Signature),
+        Certificate = (V::Signature, V::Signature),
+    >,
+    D: Digest,
+{
+    pub fn new(sender: mpsc::Sender<Message<G, D>>) -> Self {
+        Self {
+            sender,
+            _marker: PhantomData,
+        }
     }
 
-    pub async fn verified(&mut self, voters: Vec<Voter<G, D>>) {
+    pub async fn verified(&mut self, voters: Vec<LegacyVoter<V, D>>) {
+        let voters = voters
+            .into_iter()
+            .map(|legacy| Voter::from(legacy))
+            .collect::<Vec<Voter<G, D>>>();
+        self.verified_signing(voters).await;
+    }
+
+    pub async fn verified_signing(&mut self, voters: Vec<Voter<G, D>>) {
         self.sender
             .send_all(&mut stream::iter(
                 voters
                     .into_iter()
-                    .map(|voter| Ok(MessageSigning::Verified(voter))),
+                    .map(|voter| Ok(Message::Verified(voter))),
             ))
             .await
             .expect("Failed to send batch of voters");

@@ -475,7 +475,7 @@ where
 
     pub fn start(
         mut self,
-        consensus: voter::Mailbox<V, D>,
+        consensus: voter::Mailbox<V, G, D>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(consensus, receiver))
@@ -483,7 +483,7 @@ where
 
     pub async fn run(
         mut self,
-        mut consensus: voter::Mailbox<V, D>,
+        mut consensus: voter::Mailbox<V, G, D>,
         receiver: impl Receiver<PublicKey = C>,
     ) {
         // Wrap channel

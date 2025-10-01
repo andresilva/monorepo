@@ -50,7 +50,7 @@ pub struct Engine<
     context: E,
 
     voter: voter::Actor<E, C, B, V, D, A, R, F, S, G>,
-    voter_mailbox: voter::Mailbox<V, D>,
+    voter_mailbox: voter::Mailbox<V, G, D>,
 
     batcher: batcher::Actor<E, C::PublicKey, B, V, D, F, S, G>,
     batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,

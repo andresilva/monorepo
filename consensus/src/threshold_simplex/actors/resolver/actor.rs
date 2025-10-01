@@ -6,7 +6,7 @@ use crate::{
     threshold_simplex::{
         actors::voter,
         signing::{self, SigningScheme},
-        types::{Backfiller, LegacyVoter, Notarization, Nullification, Request},
+        types::{Backfiller, Request, Voter},
     },
     types::{Epoch, View},
     ThresholdSupervisor, Viewable,
@@ -198,7 +198,7 @@ where
         );
 
         // Initialize mailbox
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = mpsc::channel::<Message<V, D>>(cfg.mailbox_size);
         (
             Self {
                 context,
@@ -332,7 +332,7 @@ where
 
     pub fn start(
         mut self,
-        voter: voter::Mailbox<V, D>,
+        voter: voter::Mailbox<V, G, D>,
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
@@ -341,7 +341,7 @@ where
 
     async fn run(
         mut self,
-        mut voter: voter::Mailbox<V, D>,
+        mut voter: voter::Mailbox<V, G, D>,
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) {
@@ -569,7 +569,7 @@ where
                             }
 
                             // Update cache
-                            let mut voters: Vec<LegacyVoter<V, D>> =
+                            let mut voters: Vec<Voter<G, D>> =
                                 Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
                             let mut notarizations_found = BTreeSet::new();
                             for notarization in response.notarizations {
@@ -579,9 +579,8 @@ where
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                let legacy = Notarization::from_signing::<G>(notarization.clone());
-                                self.notarizations.insert(view, notarization);
-                                voters.push(LegacyVoter::Notarization(legacy));
+                                self.notarizations.insert(view, notarization.clone());
+                                voters.push(Voter::Notarization(notarization));
                                 notarizations_found.insert(view);
                             }
                             let mut nullifications_found = BTreeSet::new();
@@ -592,14 +591,15 @@ where
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                let legacy = Nullification::from_signing::<G>(nullification.clone());
-                                self.nullifications.insert(view, nullification);
-                                voters.push(LegacyVoter::Nullification(legacy));
+                                self.nullifications.insert(view, nullification.clone());
+                                voters.push(Voter::Nullification(nullification));
                                 nullifications_found.insert(view);
                             }
 
                             // Send voters
-                            voter.verified(voters).await;
+                            if !voters.is_empty() {
+                                voter.verified_signing(voters).await;
+                            }
 
                             // Update performance
                             let mut shuffle = false;

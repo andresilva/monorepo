@@ -16,47 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-pub mod legacy {
-    use super::ingress::{MailboxLegacy, MessageLegacy};
-    use crate::threshold_simplex::types::LegacyVoter;
-    use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
-    use futures::channel::mpsc;
-
-    pub type Mailbox<V, D> = MailboxLegacy<V, D>;
-    pub type Message<V, D> = MessageLegacy<V, D>;
-
-    pub fn mailbox<V: Variant, D: Digest>(sender: mpsc::Sender<Message<V, D>>) -> Mailbox<V, D> {
-        MailboxLegacy::new(sender)
-    }
-
-    #[allow(dead_code)]
-    pub fn verified<V: Variant, D: Digest>(voter: LegacyVoter<V, D>) -> Message<V, D> {
-        MessageLegacy::Verified(voter)
-    }
-}
-
-pub mod signing {
-    use super::ingress::{MailboxSigning, MessageSigning};
-    use crate::threshold_simplex::{signing::SigningScheme, types::Voter};
-    use commonware_cryptography::Digest;
-    use futures::channel::mpsc;
-
-    pub type Mailbox<G, D> = MailboxSigning<G, D>;
-    pub type Message<G, D> = MessageSigning<G, D>;
-
-    #[allow(dead_code)]
-    pub fn mailbox<G: SigningScheme, D: Digest>(sender: mpsc::Sender<Message<G, D>>) -> Mailbox<G, D> {
-        MailboxSigning::new(sender)
-    }
-
-    #[allow(dead_code)]
-    pub fn verified<G: SigningScheme, D: Digest>(voter: Voter<G, D>) -> Message<G, D> {
-        MessageSigning::Verified(voter)
-    }
-}
-
-pub type Mailbox<V, D> = legacy::Mailbox<V, D>;
-pub type Message<V, D> = legacy::Message<V, D>;
+pub use ingress::{Mailbox, Message};
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
