@@ -1,4 +1,4 @@
-use super::{Config, Mailbox, Message};
+use super::{legacy, Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::{batcher, resolver},
@@ -714,7 +714,7 @@ where
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::new(mailbox_sender);
+        let mailbox = legacy::mailbox(mailbox_sender);
         (
             Self {
                 context: context.clone(),
