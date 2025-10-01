@@ -1,7 +1,4 @@
-use crate::threshold_simplex::{
-    signing::SigningScheme,
-    types::Voter,
-};
+use crate::threshold_simplex::{signing::SigningScheme, types::Voter};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, stream, SinkExt};
 
@@ -22,9 +19,7 @@ impl<G: SigningScheme, D: Digest> Mailbox<G, D> {
     pub async fn verified_signing(&mut self, voters: Vec<Voter<G, D>>) {
         self.sender
             .send_all(&mut stream::iter(
-                voters
-                    .into_iter()
-                    .map(|voter| Ok(Message::Verified(voter))),
+                voters.into_iter().map(|voter| Ok(Message::Verified(voter))),
             ))
             .await
             .expect("Failed to send batch of voters");

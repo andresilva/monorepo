@@ -2447,10 +2447,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::conflicter::Config {
-                        supervisor,
-                        namespace: namespace.clone(),
-                    };
+                    let cfg = mocks::conflicter::Config::<V, _>::new(supervisor, namespace.clone());
 
                     let engine: mocks::conflicter::Conflicter<_, V, Sha256, _> =
                         mocks::conflicter::Conflicter::new(
@@ -2649,10 +2646,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::invalid::Config {
-                        supervisor,
-                        namespace: namespace.clone(),
-                    };
+                    let cfg = mocks::invalid::Config::<V, _>::new(supervisor, namespace.clone());
 
                     let engine: mocks::invalid::Invalid<_, V, Sha256, _> =
                         mocks::invalid::Invalid::new(context.with_label("byzantine_engine"), cfg);
@@ -2836,10 +2830,8 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::impersonator::Config {
-                        supervisor,
-                        namespace: namespace.clone(),
-                    };
+                    let cfg =
+                        mocks::impersonator::Config::<V, _>::new(supervisor, namespace.clone());
 
                     let engine: mocks::impersonator::Impersonator<_, V, Sha256, _> =
                         mocks::impersonator::Impersonator::new(
@@ -3022,10 +3014,8 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::reconfigurer::Config {
-                        supervisor,
-                        namespace: namespace.clone(),
-                    };
+                    let cfg =
+                        mocks::reconfigurer::Config::<V, _>::new(supervisor, namespace.clone());
                     let engine: mocks::reconfigurer::Reconfigurer<_, V, Sha256, _> =
                         mocks::reconfigurer::Reconfigurer::new(
                             context.with_label("byzantine_engine"),
@@ -3207,10 +3197,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::nuller::Config {
-                        supervisor,
-                        namespace: namespace.clone(),
-                    };
+                    let cfg = mocks::nuller::Config::<V, _>::new(supervisor, namespace.clone());
                     let engine: mocks::nuller::Nuller<_, V, Sha256, _> =
                         mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(pending);
@@ -3402,11 +3389,11 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::outdated::Config {
+                    let cfg = mocks::outdated::Config::<V, _>::new(
                         supervisor,
-                        namespace: namespace.clone(),
-                        view_delta: activity_timeout * 4,
-                    };
+                        namespace.clone(),
+                        activity_timeout * 4,
+                    );
                     let engine: mocks::outdated::Outdated<_, V, Sha256, _> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(pending);

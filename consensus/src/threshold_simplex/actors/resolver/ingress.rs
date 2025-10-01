@@ -1,11 +1,8 @@
 use crate::{
-    threshold_simplex::{
-        signing::{self, SigningScheme},
-        types::{Notarization, Nullification},
-    },
+    threshold_simplex::signing::{self, SigningScheme},
     types::View,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message<G: SigningScheme, D: Digest> {
@@ -52,37 +49,11 @@ impl<G: SigningScheme, D: Digest> Mailbox<G, D> {
             .expect("Failed to send notarization");
     }
 
-    pub async fn notarized<V>(&mut self, notarization: Notarization<V, D>)
-    where
-        V: Variant,
-        G: SigningScheme<
-            SignerId = u32,
-            Signature = (V::Signature, V::Signature),
-            Certificate = (V::Signature, V::Signature),
-        >,
-    {
-        let signing = notarization.into_signing::<G>();
-        self.notarized_signing(signing).await;
-    }
-
     pub async fn nullified_signing(&mut self, nullification: signing::Nullification<G>) {
         self.sender
             .send(Message::Nullified { nullification })
             .await
             .expect("Failed to send nullification");
-    }
-
-    pub async fn nullified<V>(&mut self, nullification: Nullification<V>)
-    where
-        V: Variant,
-        G: SigningScheme<
-            SignerId = u32,
-            Signature = (V::Signature, V::Signature),
-            Certificate = (V::Signature, V::Signature),
-        >,
-    {
-        let signing = nullification.into_signing::<G>();
-        self.nullified_signing(signing).await;
     }
 
     pub async fn finalized(&mut self, view: View) {

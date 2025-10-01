@@ -3,7 +3,7 @@ use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
-use commonware_consensus::threshold_simplex::{self, Engine, signing::BlsThresholdScheme};
+use commonware_consensus::threshold_simplex::{self, signing::BlsThresholdScheme, Engine};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops::evaluate_all,
@@ -211,12 +211,8 @@ fn main() {
         // Prepare signing scheme for threshold simplex
         let scheme_identity = identity.constant().clone();
         let evaluations = evaluate_all::<MinSig>(&identity, validators.len() as u32);
-        let signing_scheme = BlsThresholdScheme::new(
-            evaluations,
-            scheme_identity,
-            share.clone(),
-            threshold,
-        );
+        let signing_scheme =
+            BlsThresholdScheme::new(evaluations, scheme_identity, share.clone(), threshold);
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);

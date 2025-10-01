@@ -240,27 +240,28 @@ where
         let verified = activity.verified();
         match activity {
             Activity::Notarize(notarize) => {
-                let view = notarize.view();
+                let legacy = Notarize::<V, D>::from_signing::<G>(notarize.clone());
+                let view = legacy.view();
                 let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !notarize.verify(&self.namespace, polynomial) {
+                if !legacy.verify(&self.namespace, polynomial) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
-                let encoded = notarize.encode();
+                let encoded = legacy.encode();
                 Notarize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[notarize.signer() as usize].clone();
+                let public_key = validators[legacy.signer() as usize].clone();
                 self.notarizes
                     .lock()
                     .unwrap()
                     .entry(view)
                     .or_default()
-                    .entry(notarize.proposal.payload)
+                    .entry(legacy.proposal.payload)
                     .or_default()
                     .insert(public_key);
             }
@@ -292,21 +293,22 @@ where
                 self.seeds.lock().unwrap().insert(view, seed);
             }
             Activity::Nullify(nullify) => {
-                let view = nullify.view();
+                let legacy = Nullify::<V>::from_signing::<G>(nullify.clone());
+                let view = legacy.view();
                 let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify.verify(&self.namespace, polynomial) {
+                if !legacy.verify(&self.namespace, polynomial) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
-                let encoded = nullify.encode();
+                let encoded = legacy.encode();
                 Nullify::<V>::decode(encoded).unwrap();
-                let public_key = validators[nullify.signer() as usize].clone();
+                let public_key = validators[legacy.signer() as usize].clone();
                 self.nullifies
                     .lock()
                     .unwrap()
@@ -342,27 +344,28 @@ where
                 self.seeds.lock().unwrap().insert(view, seed);
             }
             Activity::Finalize(finalize) => {
-                let view = finalize.view();
+                let legacy = Finalize::<V, D>::from_signing::<G>(finalize.clone());
+                let view = legacy.view();
                 let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !finalize.verify(&self.namespace, polynomial) {
+                if !legacy.verify(&self.namespace, polynomial) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
-                let encoded = finalize.encode();
+                let encoded = legacy.encode();
                 Finalize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[finalize.signer() as usize].clone();
+                let public_key = validators[legacy.signer() as usize].clone();
                 self.finalizes
                     .lock()
                     .unwrap()
                     .entry(view)
                     .or_default()
-                    .entry(finalize.proposal.payload)
+                    .entry(legacy.proposal.payload)
                     .or_default()
                     .insert(public_key);
             }

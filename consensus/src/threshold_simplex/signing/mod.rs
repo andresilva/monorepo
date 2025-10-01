@@ -94,6 +94,14 @@ where
     }
 }
 
+impl<S> Eq for Vote<S>
+where
+    S: SigningScheme,
+    S::SignerId: Eq,
+    S::Signature: Eq,
+{
+}
+
 /// Threshold randomness recovered from consensus certificates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Seed<V: Variant> {
@@ -162,7 +170,7 @@ where
 }
 
 /// Partial notarize vote carrying the proposal and signatures.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notarize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
@@ -244,7 +252,7 @@ where
 }
 
 /// Partial nullify vote for a given round.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Nullify<S: SigningScheme> {
     pub round: Round,
     pub vote: Vote<S>,
@@ -318,7 +326,7 @@ where
 }
 
 /// Partial finalize vote carrying the proposal and signatures.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finalize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
@@ -766,6 +774,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         + EncodeSize
         + Write
         + Read<Cfg = ()>
+        + Debug
         + Send
         + Sync;
     type SignatureReadCfg: Clone + Send + Sync + 'static;
@@ -776,6 +785,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         + EncodeSize
         + Write
         + Read<Cfg = Self::SignatureReadCfg>
+        + Debug
         + Send
         + Sync;
     type Certificate: Clone
@@ -847,6 +857,26 @@ impl<V: Variant> BlsThresholdScheme<V> {
             share,
             threshold,
         }
+    }
+
+    pub fn signer_id(&self) -> u32 {
+        self.share.index
+    }
+
+    pub fn share(&self) -> &Share {
+        &self.share
+    }
+
+    pub fn polynomial(&self) -> &[V::Public] {
+        &self.polynomial
+    }
+
+    pub fn identity(&self) -> &V::Public {
+        &self.identity
+    }
+
+    pub fn threshold(&self) -> usize {
+        self.threshold
     }
 }
 

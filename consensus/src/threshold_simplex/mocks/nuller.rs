@@ -1,9 +1,10 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
+use super::signing::{sign_finalize, sign_nullify};
 use crate::{
-    threshold_simplex::types::{Finalize, Nullify, Voter},
+    threshold_simplex::{signing::BlsThresholdScheme, types::Voter},
     types::View,
-    ThresholdSupervisor, Viewable,
+    ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
@@ -12,19 +13,59 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
+use commonware_utils::quorum;
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
+type Scheme<V> = BlsThresholdScheme<V>;
+
+pub struct Config<V, S>
+where
+    V: Variant,
+    S: ThresholdSupervisor<
+        Seed = V::Signature,
+        Index = View,
+        Share = group::Share,
+        Identity = V::Public,
+        Polynomial = Vec<V::Public>,
+    >,
+{
     pub supervisor: S,
     pub namespace: Vec<u8>,
+    pub(crate) marker: PhantomData<V>,
+}
+
+impl<V, S> Config<V, S>
+where
+    V: Variant,
+    S: ThresholdSupervisor<
+        Seed = V::Signature,
+        Index = View,
+        Share = group::Share,
+        Identity = V::Public,
+        Polynomial = Vec<V::Public>,
+    >,
+{
+    pub fn new(supervisor: S, namespace: Vec<u8>) -> Self {
+        Self {
+            supervisor,
+            namespace,
+            marker: PhantomData,
+        }
+    }
 }
 
 pub struct Nuller<
     E: Spawner,
     V: Variant,
     H: Hasher,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+    S: ThresholdSupervisor<
+        Seed = V::Signature,
+        Index = View,
+        Share = group::Share,
+        Identity = V::Public,
+        Polynomial = Vec<V::Public>,
+    >,
 > {
     context: E,
     supervisor: S,
@@ -37,10 +78,16 @@ impl<
         E: Spawner,
         V: Variant,
         H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+        S: ThresholdSupervisor<
+            Seed = V::Signature,
+            Index = View,
+            Share = group::Share,
+            Identity = V::Public,
+            Polynomial = Vec<V::Public>,
+        >,
     > Nuller<E, V, H, S>
 {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<V, S>) -> Self {
         Self {
             context,
             supervisor: cfg.supervisor,
@@ -58,7 +105,7 @@ impl<
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<V, H::Digest>::decode(msg) {
+            let msg = match Voter::<Scheme<V>, H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -71,19 +118,34 @@ impl<
                 Voter::Notarize(notarize) => {
                     // Nullify
                     let view = notarize.view();
-                    let share = self.supervisor.share(view).unwrap();
-                    let n = Nullify::sign(&self.namespace, share, notarize.proposal.round);
-                    let msg = Voter::<V, H::Digest>::Nullify(n).encode().into();
+                    let scheme = match self.build_scheme(view) {
+                        Some(scheme) => scheme,
+                        None => continue,
+                    };
+                    let n = sign_nullify(&scheme, &self.namespace, notarize.proposal.round);
+                    let msg = Voter::<Scheme<V>, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
                     let proposal = notarize.proposal;
-                    let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
+                    let f = sign_finalize(&scheme, &self.namespace, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,
             }
         }
+    }
+
+    fn build_scheme(&self, view: View) -> Option<Scheme<V>> {
+        let share = self.supervisor.share(view)?.clone();
+        let polynomial = self.supervisor.polynomial(view)?.clone();
+        let participants = self.supervisor.participants(view)?;
+        let threshold = quorum(participants.len() as u32) as usize;
+        let identity = self.supervisor.identity().clone();
+
+        Some(BlsThresholdScheme::new(
+            polynomial, identity, share, threshold,
+        ))
     }
 }

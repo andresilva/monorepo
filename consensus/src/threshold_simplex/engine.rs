@@ -134,15 +134,7 @@ where
         );
 
         // Create resolver
-        let (resolver, resolver_mailbox) = resolver::Actor::<
-            E,
-            C::PublicKey,
-            B,
-            V,
-            D,
-            S,
-            G,
-        >::new(
+        let (resolver, resolver_mailbox) = resolver::Actor::<E, C::PublicKey, B, V, D, S, G>::new(
             context.with_label("resolver"),
             resolver::Config {
                 blocker: cfg.blocker,

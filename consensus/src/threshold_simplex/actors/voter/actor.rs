@@ -6,10 +6,7 @@ use crate::{
         metrics::{self, Inbound, Outbound},
         min_active,
         signing::{self, SigningScheme, Vote, VoteContext},
-        types::{
-            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
-            Nullify, Proposal, Voter,
-        },
+        types::{Activity, Context, Finalization, Notarization, Nullification, Proposal, Voter},
     },
     types::{Epoch, Round as Rnd, View},
     Automaton, Epochable, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
@@ -947,35 +944,35 @@ where
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            if let Some(finalization) = self.construct_finalization(past_view, true).await {
+            if let Some(signing_finalization) = self.construct_finalization(past_view, true).await {
                 self.outbound_messages
                     .get_or_create(&metrics::FINALIZATION)
                     .inc();
-                let signing = finalization.clone().into_signing::<G>();
-                let msg = Voter::Finalization(signing);
+                let msg = Voter::Finalization(signing_finalization);
                 recovered_sender
                     .send(Recipients::All, msg, true)
                     .await
                     .unwrap();
                 debug!(view = past_view, "rebroadcast entry finalization");
-            } else if let Some(notarization) = self.construct_notarization(past_view, true).await {
+            } else if let Some(signing_notarization) =
+                self.construct_notarization(past_view, true).await
+            {
                 self.outbound_messages
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
-                let signing = notarization.clone().into_signing::<G>();
-                let msg = Voter::Notarization(signing);
+                let msg = Voter::Notarization(signing_notarization);
                 recovered_sender
                     .send(Recipients::All, msg, true)
                     .await
                     .unwrap();
                 debug!(view = past_view, "rebroadcast entry notarization");
-            } else if let Some(nullification) = self.construct_nullification(past_view, true).await
+            } else if let Some(signing_nullification) =
+                self.construct_nullification(past_view, true).await
             {
                 self.outbound_messages
                     .get_or_create(&metrics::NULLIFICATION)
                     .inc();
-                let signing = nullification.clone().into_signing::<G>();
-                let msg = Voter::Nullification(signing);
+                let msg = Voter::Nullification(signing_nullification);
                 recovered_sender
                     .send(Recipients::All, msg, true)
                     .await
@@ -990,16 +987,16 @@ where
         }
 
         // Construct nullify
-        let share = self.supervisor.share(self.view).unwrap();
-        let nullify = Nullify::sign(&self.namespace, share, Rnd::new(self.epoch, self.view));
+        let signing_nullify = self
+            .sign_nullify_for(self.view)
+            .expect("participant should have signing share for nullify");
 
         // Handle the nullify
         if !retry {
-            let signing_nullify = nullify.clone().into_signing::<G>();
             batcher
                 .constructed(Voter::Nullify(signing_nullify.clone()))
                 .await;
-            self.handle_nullify(nullify.clone()).await;
+            self.handle_nullify(signing_nullify.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1014,17 +1011,71 @@ where
         self.outbound_messages
             .get_or_create(&metrics::NULLIFY)
             .inc();
-        let signing = nullify.clone().into_signing::<G>();
         pending_sender
-            .send(Recipients::All, Voter::Nullify(signing), true)
+            .send(Recipients::All, Voter::Nullify(signing_nullify), true)
             .await
             .unwrap();
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn handle_nullify(&mut self, nullify: Nullify<V>) {
+    fn sign_notarize_for(&self, proposal: &Proposal<D>) -> Option<signing::Notarize<G, D>> {
+        let share = self.supervisor.share(proposal.view())?;
+        let vote = self
+            .signing
+            .sign_vote(
+                VoteContext::Notarize {
+                    namespace: &self.namespace,
+                    proposal,
+                },
+                share.index,
+            )
+            .ok()?;
+
+        Some(signing::Notarize {
+            proposal: proposal.clone(),
+            vote,
+        })
+    }
+
+    fn sign_finalize_for(&self, proposal: &Proposal<D>) -> Option<signing::Finalize<G, D>> {
+        let share = self.supervisor.share(proposal.view())?;
+        let vote = self
+            .signing
+            .sign_vote(
+                VoteContext::Finalize {
+                    namespace: &self.namespace,
+                    proposal,
+                },
+                share.index,
+            )
+            .ok()?;
+
+        Some(signing::Finalize {
+            proposal: proposal.clone(),
+            vote,
+        })
+    }
+
+    fn sign_nullify_for(&self, view: View) -> Option<signing::Nullify<G>> {
+        let share = self.supervisor.share(view)?;
+        let round = Rnd::new(self.epoch, view);
+        let vote = self
+            .signing
+            .sign_vote::<D>(
+                VoteContext::Nullify {
+                    namespace: &self.namespace,
+                    round,
+                },
+                share.index,
+            )
+            .ok()?;
+
+        Some(signing::Nullify { round, vote })
+    }
+
+    async fn handle_nullify(&mut self, signing_nullify: signing::Nullify<G>) {
         // Check to see if nullify is for proposal in view
-        let view = nullify.view();
+        let view = signing_nullify.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
@@ -1033,17 +1084,6 @@ where
             Rnd::new(self.epoch, view),
         ));
 
-        let signer = nullify.signer();
-        let round_value = nullify.round;
-        let view_signature = nullify.view_signature.value;
-        let seed_signature = nullify.seed_signature.value;
-        let signing_nullify = signing::Nullify {
-            round: round_value,
-            vote: Vote {
-                signer,
-                signature: (view_signature, seed_signature),
-            },
-        };
         if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Nullify(signing_nullify.clone());
             journal
@@ -1293,9 +1333,9 @@ where
         self.tracked_views.set(self.views.len() as i64);
     }
 
-    async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
+    async fn handle_notarize(&mut self, signing_notarize: signing::Notarize<G, D>) {
         // Check to see if notarize is for proposal in view
-        let view = notarize.view();
+        let view = signing_notarize.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
@@ -1304,17 +1344,6 @@ where
             Rnd::new(self.epoch, view),
         ));
 
-        let signer = notarize.signer();
-        let proposal = notarize.proposal.clone();
-        let proposal_signature = notarize.proposal_signature.value;
-        let seed_signature = notarize.seed_signature.value;
-        let signing_notarize = signing::Notarize {
-            proposal,
-            vote: Vote {
-                signer,
-                signature: (proposal_signature, seed_signature),
-            },
-        };
         if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Notarize(signing_notarize.clone());
             journal
@@ -1325,9 +1354,7 @@ where
         round.add_verified_notarize(signing_notarize).await;
     }
 
-    async fn notarization(&mut self, notarization: Notarization<V, D>) -> Action {
-        let signing_notarization = notarization.clone().into_signing::<G>();
-
+    async fn notarization(&mut self, signing_notarization: signing::Notarization<G, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = signing_notarization.proposal.view();
         if !interesting(
@@ -1351,6 +1378,7 @@ where
         // Verify notarization
         let identity = self.supervisor.identity();
         let certificate = signing_notarization.certificate.clone();
+        let legacy = Notarization::<V, D>::from_signing::<G>(signing_notarization.clone());
         let scheme_valid = self
             .signing
             .verify_certificate::<D>(
@@ -1361,21 +1389,16 @@ where
                 &certificate,
             )
             .is_ok();
-        if !scheme_valid && !notarization.verify(&self.namespace, identity) {
+        if !scheme_valid && !legacy.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
         // Handle notarization
-        self.handle_notarization(signing_notarization, notarization)
-            .await;
+        self.handle_notarization(signing_notarization).await;
         Action::Process
     }
 
-    async fn handle_notarization(
-        &mut self,
-        signing_notarization: signing::Notarization<G, D>,
-        legacy: Notarization<V, D>,
-    ) {
+    async fn handle_notarization(&mut self, signing_notarization: signing::Notarization<G, D>) {
         // Create round (if it doesn't exist)
         let view = signing_notarization.proposal.view();
         let round = self.views.entry(view).or_insert(Round::new(
@@ -1387,6 +1410,7 @@ where
         ));
 
         // Store notarization
+        let legacy = Notarization::<V, D>::from_signing::<G>(signing_notarization.clone());
         let seed = legacy.seed_signature.clone();
         let added = round.add_verified_notarization(signing_notarization.clone());
         if added {
@@ -1403,9 +1427,7 @@ where
         self.enter_view(view + 1, seed);
     }
 
-    async fn nullification(&mut self, nullification: Nullification<V>) -> Action {
-        let signing_nullification = nullification.clone().into_signing::<G>();
-
+    async fn nullification(&mut self, signing_nullification: signing::Nullification<G>) -> Action {
         // Check if we are still in a view where this notarization could help
         if !interesting(
             self.activity_timeout,
@@ -1428,6 +1450,7 @@ where
         // Verify nullification
         let identity = self.supervisor.identity();
         let certificate = signing_nullification.certificate.clone();
+        let legacy = Nullification::<V>::from_signing::<G>(signing_nullification.clone());
         let scheme_valid = self
             .signing
             .verify_certificate::<D>(
@@ -1438,21 +1461,16 @@ where
                 &certificate,
             )
             .is_ok();
-        if !scheme_valid && !nullification.verify(&self.namespace, identity) {
+        if !scheme_valid && !legacy.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
         // Handle notarization
-        self.handle_nullification(signing_nullification, nullification)
-            .await;
+        self.handle_nullification(signing_nullification).await;
         Action::Process
     }
 
-    async fn handle_nullification(
-        &mut self,
-        signing_nullification: signing::Nullification<G>,
-        legacy: Nullification<V>,
-    ) {
+    async fn handle_nullification(&mut self, signing_nullification: signing::Nullification<G>) {
         // Create round (if it doesn't exist)
         let view = signing_nullification.round.view();
         let round = self.views.entry(view).or_insert(Round::new(
@@ -1464,6 +1482,7 @@ where
         ));
 
         // Store nullification
+        let legacy = Nullification::<V>::from_signing::<G>(signing_nullification.clone());
         let seed = legacy.seed_signature.clone();
         let added = round.add_verified_nullification(signing_nullification.clone());
         if added {
@@ -1480,9 +1499,9 @@ where
         self.enter_view(view + 1, seed);
     }
 
-    async fn handle_finalize(&mut self, finalize: Finalize<V, D>) {
+    async fn handle_finalize(&mut self, signing_finalize: signing::Finalize<G, D>) {
         // Get view for finalize
-        let view = finalize.view();
+        let view = signing_finalize.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
@@ -1492,17 +1511,6 @@ where
         ));
 
         // Handle finalize
-        let signer = finalize.signer();
-        let proposal = finalize.proposal.clone();
-        let proposal_signature = finalize.proposal_signature.value;
-        let seed_signature = finalize.seed_signature.value;
-        let signing_finalize = signing::Finalize {
-            proposal,
-            vote: Vote {
-                signer,
-                signature: (proposal_signature, seed_signature),
-            },
-        };
         if let Some(journal) = self.journal.as_mut() {
             let msg = Voter::Finalize(signing_finalize.clone());
             journal
@@ -1513,9 +1521,7 @@ where
         round.add_verified_finalize(signing_finalize).await
     }
 
-    async fn finalization(&mut self, finalization: Finalization<V, D>) -> Action {
-        let signing_finalization = finalization.clone().into_signing::<G>();
-
+    async fn finalization(&mut self, signing_finalization: signing::Finalization<G, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = signing_finalization.proposal.view();
         if !interesting(
@@ -1539,6 +1545,7 @@ where
         // Verify finalization
         let identity = self.supervisor.identity();
         let certificate = signing_finalization.certificate.clone();
+        let legacy = Finalization::<V, D>::from_signing::<G>(signing_finalization.clone());
         let scheme_valid = self
             .signing
             .verify_certificate::<D>(
@@ -1549,21 +1556,16 @@ where
                 &certificate,
             )
             .is_ok();
-        if !scheme_valid && !finalization.verify(&self.namespace, identity) {
+        if !scheme_valid && !legacy.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
         // Process finalization
-        self.handle_finalization(signing_finalization, finalization)
-            .await;
+        self.handle_finalization(signing_finalization).await;
         Action::Process
     }
 
-    async fn handle_finalization(
-        &mut self,
-        signing_finalization: signing::Finalization<G, D>,
-        legacy: Finalization<V, D>,
-    ) {
+    async fn handle_finalization(&mut self, signing_finalization: signing::Finalization<G, D>) {
         // Create round (if it doesn't exist)
         let view = signing_finalization.proposal.view();
         let round = self.views.entry(view).or_insert(Round::new(
@@ -1575,6 +1577,7 @@ where
         ));
 
         // Store finalization
+        let legacy = Finalization::<V, D>::from_signing::<G>(signing_finalization.clone());
         let seed = legacy.seed_signature.clone();
         let added = round.add_verified_finalization(signing_finalization.clone());
         if added {
@@ -1596,7 +1599,7 @@ where
         self.enter_view(view + 1, seed);
     }
 
-    fn construct_notarize(&mut self, view: u64) -> Option<Notarize<V, D>> {
+    fn construct_notarize(&mut self, view: u64) -> Option<signing::Notarize<G, D>> {
         // Determine if it makes sense to broadcast a notarize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_notarize {
@@ -1608,49 +1611,46 @@ where
         if !round.verified_proposal {
             return None;
         }
-        round.broadcast_notarize = true;
-
         // Construct notarize
-        let share = self.supervisor.share(view)?;
-        let proposal = round.proposal.as_ref().unwrap();
-        Some(Notarize::sign(&self.namespace, share, proposal.clone()))
+        let proposal = {
+            round.broadcast_notarize = true;
+            match round.proposal.clone() {
+                Some(proposal) => proposal,
+                None => return None,
+            }
+        };
+        self.sign_notarize_for(&proposal)
     }
 
     async fn construct_notarization(
         &mut self,
         view: u64,
         force: bool,
-    ) -> Option<Notarization<V, D>> {
+    ) -> Option<signing::Notarization<G, D>> {
         // Get requested view
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct notarization
         let polynomial = self.supervisor.polynomial(view)?;
         let threshold = quorum_from_slice(polynomial);
-        round
-            .notarizable(&self.namespace, threshold, force)
-            .await
-            .map(|notarization| Notarization::from_signing::<G>(notarization))
+        round.notarizable(&self.namespace, threshold, force).await
     }
 
     async fn construct_nullification(
         &mut self,
         view: u64,
         force: bool,
-    ) -> Option<Nullification<V>> {
+    ) -> Option<signing::Nullification<G>> {
         // Get requested view
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct nullification
         let polynomial = self.supervisor.polynomial(view)?;
         let threshold = quorum_from_slice(polynomial);
-        round
-            .nullifiable(&self.namespace, threshold, force)
-            .await
-            .map(|nullification| Nullification::from_signing::<G>(nullification))
+        round.nullifiable(&self.namespace, threshold, force).await
     }
 
-    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<V, D>> {
+    fn construct_finalize(&mut self, view: u64) -> Option<signing::Finalize<G, D>> {
         // Determine if it makes sense to broadcast a finalize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_nullify {
@@ -1667,28 +1667,27 @@ where
         if round.broadcast_finalize {
             return None;
         }
-        round.broadcast_finalize = true;
-        let share = self.supervisor.share(view)?;
-        let Some(proposal) = &round.proposal else {
-            return None;
+        let proposal = {
+            round.broadcast_finalize = true;
+            match round.proposal.clone() {
+                Some(proposal) => proposal,
+                None => return None,
+            }
         };
-        Some(Finalize::sign(&self.namespace, share, proposal.clone()))
+        self.sign_finalize_for(&proposal)
     }
 
     async fn construct_finalization(
         &mut self,
         view: u64,
         force: bool,
-    ) -> Option<Finalization<V, D>> {
+    ) -> Option<signing::Finalization<G, D>> {
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct finalization
         let polynomial = self.supervisor.polynomial(view)?;
         let threshold = quorum_from_slice(polynomial);
-        round
-            .finalizable(&self.namespace, threshold, force)
-            .await
-            .map(|finalization| Finalization::from_signing::<G>(finalization))
+        round.finalizable(&self.namespace, threshold, force).await
     }
 
     async fn notify<Sp: Sender, Sr: Sender>(
@@ -1700,18 +1699,15 @@ where
         view: u64,
     ) {
         // Attempt to notarize
-        if let Some(notarize) = self.construct_notarize(view) {
-            // Handle the notarize
+        if let Some(signing_notarize) = self.construct_notarize(view) {
             self.outbound_messages
                 .get_or_create(&metrics::NOTARIZE)
                 .inc();
-            let signing_notarize = notarize.clone().into_signing::<G>();
             batcher
                 .constructed(Voter::Notarize(signing_notarize.clone()))
                 .await;
-            self.handle_notarize(notarize.clone()).await;
+            self.handle_notarize(signing_notarize.clone()).await;
 
-            // Sync the journal
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1719,16 +1715,14 @@ where
                 .await
                 .expect("unable to sync journal");
 
-            // Broadcast the notarize
-            let signing = notarize.clone().into_signing::<G>();
             pending_sender
-                .send(Recipients::All, Voter::Notarize(signing), true)
+                .send(Recipients::All, Voter::Notarize(signing_notarize), true)
                 .await
                 .unwrap();
-        };
+        }
 
         // Attempt to notarization
-        if let Some(notarization) = self.construct_notarization(view, false).await {
+        if let Some(signing_notarization) = self.construct_notarization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
             if let Some((leader, elapsed)) = self.since_view_start(view) {
                 if leader {
@@ -1740,12 +1734,11 @@ where
             self.outbound_messages
                 .get_or_create(&metrics::NOTARIZATION)
                 .inc();
-            let signing_notarization = notarization.clone().into_signing::<G>();
             // Update resolver
             resolver
                 .notarized_signing(signing_notarization.clone())
                 .await;
-            self.handle_notarization(signing_notarization.clone(), notarization.clone()).await;
+            self.handle_notarization(signing_notarization.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1757,31 +1750,33 @@ where
 
             // Alert application
             self.reporter
-                .report(Activity::Notarization(signing_notarization))
+                .report(Activity::Notarization(signing_notarization.clone()))
                 .await;
 
-            // Broadcast the notarization
-            let signing_clone = notarization.clone().into_signing::<G>();
             recovered_sender
-                .send(Recipients::All, Voter::Notarization(signing_clone), true)
+                .send(
+                    Recipients::All,
+                    Voter::Notarization(signing_notarization),
+                    true,
+                )
                 .await
                 .unwrap();
-        };
+        }
 
         // Attempt to nullification
         //
         // We handle broadcast of nullify in `timeout`.
-        if let Some(nullification) = self.construct_nullification(view, false).await {
+        if let Some(signing_nullification) = self.construct_nullification(view, false).await {
             // Handle the nullification
             self.outbound_messages
                 .get_or_create(&metrics::NULLIFICATION)
                 .inc();
-            let signing_nullification = nullification.clone().into_signing::<G>();
             // Update resolver
             resolver
                 .nullified_signing(signing_nullification.clone())
                 .await;
-            self.handle_nullification(signing_nullification.clone(), nullification.clone()).await;
+            self.handle_nullification(signing_nullification.clone())
+                .await;
 
             // Sync the journal
             self.journal
@@ -1793,13 +1788,16 @@ where
 
             // Alert application
             self.reporter
-                .report(Activity::Nullification(signing_nullification))
+                .report(Activity::Nullification(signing_nullification.clone()))
                 .await;
 
             // Broadcast the nullification
-            let signing_clone = nullification.clone().into_signing::<G>();
             recovered_sender
-                .send(Recipients::All, Voter::Nullification(signing_clone), true)
+                .send(
+                    Recipients::All,
+                    Voter::Nullification(signing_nullification.clone()),
+                    true,
+                )
                 .await
                 .unwrap();
 
@@ -1835,12 +1833,15 @@ where
                     last_finalized = self.last_finalized,
                     "not backfilling because parent is behind finalized tip, broadcasting finalized"
                 );
-                    if let Some(finalization) =
+                    if let Some(signing_finalization) =
                         self.construct_finalization(self.last_finalized, true).await
                     {
-                        let signing = finalization.clone().into_signing::<G>();
                         recovered_sender
-                            .send(Recipients::All, Voter::Finalization(signing), true)
+                            .send(
+                                Recipients::All,
+                                Voter::Finalization(signing_finalization),
+                                true,
+                            )
                             .await
                             .expect("unable to broadcast finalization");
                     } else {
@@ -1854,16 +1855,15 @@ where
         }
 
         // Attempt to finalize
-        if let Some(finalize) = self.construct_finalize(view) {
+        if let Some(signing_finalize) = self.construct_finalize(view) {
             // Handle the finalize
             self.outbound_messages
                 .get_or_create(&metrics::FINALIZE)
                 .inc();
-            let signing_finalize = finalize.clone().into_signing::<G>();
             batcher
                 .constructed(Voter::Finalize(signing_finalize.clone()))
                 .await;
-            self.handle_finalize(finalize.clone()).await;
+            self.handle_finalize(signing_finalize.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1874,15 +1874,14 @@ where
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            let signing_broadcast = finalize.clone().into_signing::<G>();
             pending_sender
-                .send(Recipients::All, Voter::Finalize(signing_broadcast), true)
+                .send(Recipients::All, Voter::Finalize(signing_finalize), true)
                 .await
                 .unwrap();
-        };
+        }
 
         // Attempt to finalization
-        if let Some(finalization) = self.construct_finalization(view, false).await {
+        if let Some(signing_finalization) = self.construct_finalization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
             if let Some((leader, elapsed)) = self.since_view_start(view) {
                 if leader {
@@ -1897,8 +1896,7 @@ where
             self.outbound_messages
                 .get_or_create(&metrics::FINALIZATION)
                 .inc();
-            let signing_finalization = finalization.clone().into_signing::<G>();
-            self.handle_finalization(signing_finalization.clone(), finalization.clone()).await;
+            self.handle_finalization(signing_finalization.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1910,16 +1908,19 @@ where
 
             // Alert application
             self.reporter
-                .report(Activity::Finalization(signing_finalization))
+                .report(Activity::Finalization(signing_finalization.clone()))
                 .await;
 
             // Broadcast the finalization
-            let signing_broadcast = finalization.clone().into_signing::<G>();
             recovered_sender
-                .send(Recipients::All, Voter::Finalization(signing_broadcast), true)
+                .send(
+                    Recipients::All,
+                    Voter::Finalization(signing_finalization),
+                    true,
+                )
                 .await
                 .unwrap();
-        };
+        }
     }
 
     pub fn start(
@@ -1988,13 +1989,12 @@ where
                 let view = voter.view();
                 match voter {
                     Voter::Notarize(signing_notarize) => {
-                        let notarize = Notarize::from_signing::<G>(signing_notarize.clone());
-                        let public_key_index = notarize.signer();
+                        let public_key_index = signing_notarize.signer();
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        let proposal = notarize.proposal.clone();
-                        self.handle_notarize(notarize.clone()).await;
+                        let proposal = signing_notarize.proposal.clone();
+                        self.handle_notarize(signing_notarize.clone()).await;
                         let activity = Activity::Notarize(signing_notarize);
                         self.reporter.report(activity).await;
 
@@ -2008,12 +2008,7 @@ where
                         }
                     }
                     Voter::Notarization(signing_notarization) => {
-                        let notarization = Notarization::from_signing::<G>(signing_notarization.clone());
-                        self.handle_notarization(
-                            signing_notarization.clone(),
-                            notarization,
-                        )
-                        .await;
+                        self.handle_notarization(signing_notarization.clone()).await;
                         let activity = Activity::Notarization(signing_notarization.clone());
                         self.reporter.report(activity).await;
 
@@ -2021,12 +2016,11 @@ where
                         round.broadcast_notarization = true;
                     }
                     Voter::Nullify(signing_nullify) => {
-                        let nullify = Nullify::from_signing::<G>(signing_nullify.clone());
-                        let public_key_index = nullify.signer();
+                        let public_key_index = signing_nullify.signer();
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_nullify(nullify.clone()).await;
+                        self.handle_nullify(signing_nullify.clone()).await;
                         let activity = Activity::Nullify(signing_nullify);
                         self.reporter.report(activity).await;
 
@@ -2036,12 +2030,8 @@ where
                         }
                     }
                     Voter::Nullification(signing_nullification) => {
-                        let nullification = Nullification::from_signing::<G>(signing_nullification.clone());
-                        self.handle_nullification(
-                            signing_nullification.clone(),
-                            nullification,
-                        )
-                        .await;
+                        self.handle_nullification(signing_nullification.clone())
+                            .await;
                         let activity = Activity::Nullification(signing_nullification.clone());
                         self.reporter.report(activity).await;
 
@@ -2049,12 +2039,11 @@ where
                         round.broadcast_nullification = true;
                     }
                     Voter::Finalize(signing_finalize) => {
-                        let finalize = Finalize::from_signing::<G>(signing_finalize.clone());
-                        let public_key_index = finalize.signer();
+                        let public_key_index = signing_finalize.signer();
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_finalize(finalize.clone()).await;
+                        self.handle_finalize(signing_finalize.clone()).await;
                         let activity = Activity::Finalize(signing_finalize);
                         self.reporter.report(activity).await;
 
@@ -2064,12 +2053,7 @@ where
                         }
                     }
                     Voter::Finalization(signing_finalization) => {
-                        let finalization = Finalization::from_signing::<G>(signing_finalization.clone());
-                        self.handle_finalization(
-                            signing_finalization.clone(),
-                            finalization,
-                        )
-                        .await;
+                        self.handle_finalization(signing_finalization.clone()).await;
                         let activity = Activity::Finalization(signing_finalization.clone());
                         self.reporter.report(activity).await;
 
@@ -2259,29 +2243,26 @@ where
 
                     // Handle verifier and resolver
                     match msg {
-                        Voter::Notarize(notarize) => {
-                            self.handle_notarize(Notarize::from_signing::<G>(notarize)).await;
+                        Voter::Notarize(signing_notarize) => {
+                            self.handle_notarize(signing_notarize).await;
                         }
-                        Voter::Nullify(nullify) => {
-                            self.handle_nullify(Nullify::from_signing::<G>(nullify)).await;
+                        Voter::Nullify(signing_nullify) => {
+                            self.handle_nullify(signing_nullify).await;
                         }
-                        Voter::Finalize(finalize) => {
-                            self.handle_finalize(Finalize::from_signing::<G>(finalize)).await;
+                        Voter::Finalize(signing_finalize) => {
+                            self.handle_finalize(signing_finalize).await;
                         }
-                        Voter::Notarization(notarization) => {
+                        Voter::Notarization(signing_notarization) => {
                             trace!(view, "received notarization from resolver");
-                            let legacy = Notarization::from_signing::<G>(notarization.clone());
-                            self.handle_notarization(notarization, legacy).await;
+                            self.handle_notarization(signing_notarization).await;
                         }
-                        Voter::Nullification(nullification) => {
+                        Voter::Nullification(signing_nullification) => {
                             trace!(view, "received nullification from resolver");
-                            let legacy = Nullification::from_signing::<G>(nullification.clone());
-                            self.handle_nullification(nullification, legacy).await;
+                            self.handle_nullification(signing_nullification).await;
                         }
-                        Voter::Finalization(finalization) => {
+                        Voter::Finalization(signing_finalization) => {
                             trace!(view, "received finalization from resolver");
-                            let legacy = Finalization::from_signing::<G>(finalization.clone());
-                            self.handle_finalization(finalization, legacy).await;
+                            self.handle_finalization(signing_finalization).await;
                         }
                     }
                 },
@@ -2312,29 +2293,22 @@ where
                     view = msg.view();
                     let action = match msg {
                         Voter::Notarization(signing_notarization) => {
-                            let notarization = Notarization::from_signing::<G>(
-                                signing_notarization.clone(),
-                            );
                             self.inbound_messages
                                 .get_or_create(&Inbound::notarization(&sender))
                                 .inc();
-                            self.notarization(notarization).await
+                            self.notarization(signing_notarization).await
                         }
                         Voter::Nullification(signing_nullification) => {
-                            let nullification =
-                                Nullification::from_signing::<G>(signing_nullification.clone());
                             self.inbound_messages
                                 .get_or_create(&Inbound::nullification(&sender))
                                 .inc();
-                            self.nullification(nullification).await
+                            self.nullification(signing_nullification).await
                         }
                         Voter::Finalization(signing_finalization) => {
-                            let finalization =
-                                Finalization::from_signing::<G>(signing_finalization.clone());
                             self.inbound_messages
                                 .get_or_create(&Inbound::finalization(&sender))
                                 .inc();
-                            self.finalization(finalization).await
+                            self.finalization(signing_finalization).await
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
                             warn!(?sender, "blocking peer for invalid message type");

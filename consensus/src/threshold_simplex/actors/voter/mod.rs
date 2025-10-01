@@ -64,10 +64,10 @@ mod tests {
         threshold_simplex::{
             actors::{batcher, resolver},
             mocks::{self, signing},
+            signing::BlsThresholdScheme,
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
-        Viewable,
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -285,7 +285,8 @@ mod tests {
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let finalization =
                 Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
-            let msg = Voter::Finalization(finalization).encode().into();
+            let signing_finalization = finalization.into_signing::<BlsThresholdScheme<MinSig>>();
+            let msg = Voter::Finalization(signing_finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -343,9 +344,11 @@ mod tests {
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
             let seed_signature =
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
-            let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+            let notarization: Notarization<MinSig, _> =
+                Notarization::new(proposal, proposal_signature, seed_signature);
+            let signing_notarization = notarization.into_signing::<BlsThresholdScheme<MinSig>>();
             mailbox
-                .verified_signing(vec![Voter::Notarization(notarization)])
+                .verified_signing(vec![Voter::Notarization(signing_notarization)])
                 .await;
 
             // Send new finalization (view 300)
@@ -369,7 +372,8 @@ mod tests {
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let finalization =
                 Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
-            let msg = Voter::Finalization(finalization).encode().into();
+            let signing_finalization = finalization.into_signing::<BlsThresholdScheme<MinSig>>();
+            let msg = Voter::Finalization(signing_finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -617,13 +621,10 @@ mod tests {
                 finalization_lf_sigs.iter().map(|(_, ss)| ss),
             )
             .unwrap();
-            let msg = Voter::Finalization(Finalization::<MinSig, _>::new(
-                proposal_lf,
-                final_prop_sig,
-                final_seed_sig,
-            ))
-            .encode()
-            .into();
+            let finalization =
+                Finalization::<MinSig, _>::new(proposal_lf, final_prop_sig, final_seed_sig);
+            let signing_finalization = finalization.into_signing::<BlsThresholdScheme<MinSig>>();
+            let msg = Voter::Finalization(signing_finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -685,7 +686,9 @@ mod tests {
             .unwrap();
             let notarization_for_floor =
                 Notarization::<MinSig, _>::new(proposal_jft, not_prop_sig, not_seed_sig);
-            let msg = Voter::Notarization(notarization_for_floor).encode().into();
+            let signing_notarization =
+                notarization_for_floor.into_signing::<BlsThresholdScheme<MinSig>>();
+            let msg = Voter::Notarization(signing_notarization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -730,7 +733,9 @@ mod tests {
             .unwrap();
             let notarization_for_bft =
                 Notarization::<MinSig, _>::new(proposal_bft, not_prop_sig, not_seed_sig);
-            let msg = Voter::Notarization(notarization_for_bft).encode().into();
+            let signing_notarization =
+                notarization_for_bft.into_signing::<BlsThresholdScheme<MinSig>>();
+            let msg = Voter::Notarization(signing_notarization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -769,13 +774,10 @@ mod tests {
                 finalization_lf_sigs.iter().map(|(_, ss)| ss),
             )
             .unwrap();
-            let msg = Voter::Finalization(Finalization::<MinSig, _>::new(
-                proposal_lf,
-                final_prop_sig,
-                final_seed_sig,
-            ))
-            .encode()
-            .into();
+            let finalization =
+                Finalization::<MinSig, _>::new(proposal_lf, final_prop_sig, final_seed_sig);
+            let signing_finalization = finalization.into_signing::<BlsThresholdScheme<MinSig>>();
+            let msg = Voter::Finalization(signing_finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -967,7 +969,13 @@ mod tests {
             )
             .unwrap();
 
-            for finalize in finalizes.iter().cloned() {
+            let signing_finalizes: Vec<_> = finalizes
+                .iter()
+                .cloned()
+                .map(|f| f.into_signing::<BlsThresholdScheme<MinSig>>())
+                .collect();
+
+            for finalize in signing_finalizes {
                 mailbox
                     .verified_signing(vec![Voter::Finalize(finalize)])
                     .await;

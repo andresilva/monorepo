@@ -1,8 +1,5 @@
 use crate::{
-    threshold_simplex::{
-        signing::SigningScheme,
-        types::Voter,
-    },
+    threshold_simplex::{signing::SigningScheme, types::Voter},
     types::View,
 };
 use commonware_cryptography::{Digest, PublicKey};
