@@ -848,7 +848,7 @@ where
     #[allow(clippy::question_mark)]
     async fn propose(
         &mut self,
-        resolver: &mut resolver::Mailbox<V, D>,
+        resolver: &mut resolver::Mailbox<G, D>,
     ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
@@ -1688,7 +1688,7 @@ where
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
-        resolver: &mut resolver::Mailbox<V, D>,
+        resolver: &mut resolver::Mailbox<G, D>,
         pending_sender: &mut WrappedSender<Sp, LegacyVoter<V, D>>,
         recovered_sender: &mut WrappedSender<Sr, LegacyVoter<V, D>>,
         view: u64,
@@ -1727,14 +1727,15 @@ where
                 }
             }
 
-            // Update resolver
-            resolver.notarized(notarization.clone()).await;
-
             // Handle the notarization
             self.outbound_messages
                 .get_or_create(&metrics::NOTARIZATION)
                 .inc();
             let signing_notarization = notarization.clone().into_signing::<G>();
+            // Update resolver
+            resolver
+                .notarized_signing(signing_notarization.clone())
+                .await;
             self.handle_notarization(signing_notarization.clone(), notarization.clone()).await;
 
             // Sync the journal
@@ -1761,14 +1762,15 @@ where
         //
         // We handle broadcast of nullify in `timeout`.
         if let Some(nullification) = self.construct_nullification(view, false).await {
-            // Update resolver
-            resolver.nullified(nullification.clone()).await;
-
             // Handle the nullification
             self.outbound_messages
                 .get_or_create(&metrics::NULLIFICATION)
                 .inc();
             let signing_nullification = nullification.clone().into_signing::<G>();
+            // Update resolver
+            resolver
+                .nullified_signing(signing_nullification.clone())
+                .await;
             self.handle_nullification(signing_nullification.clone(), nullification.clone()).await;
 
             // Sync the journal
@@ -1908,7 +1910,7 @@ where
     pub fn start(
         mut self,
         batcher: batcher::Mailbox<C::PublicKey, V, D>,
-        resolver: resolver::Mailbox<V, D>,
+        resolver: resolver::Mailbox<G, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
@@ -1925,7 +1927,7 @@ where
     async fn run(
         mut self,
         mut batcher: batcher::Mailbox<C::PublicKey, V, D>,
-        mut resolver: resolver::Mailbox<V, D>,
+        mut resolver: resolver::Mailbox<G, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,

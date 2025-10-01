@@ -9,7 +9,7 @@ use crate::{
         types::{Backfiller, Request, Voter},
     },
     types::{Epoch, View},
-    ThresholdSupervisor, Viewable,
+    ThresholdSupervisor,
 };
 use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
@@ -29,6 +29,7 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -137,7 +138,7 @@ pub struct Actor<
     inflight: Inflight,
     retry: Option<SystemTime>,
 
-    mailbox_receiver: mpsc::Receiver<Message<V, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<G, D>>,
 
     fetch_timeout: Duration,
     max_fetch_count: usize,
@@ -147,6 +148,7 @@ pub struct Actor<
     unfulfilled: Gauge,
     outstanding: Gauge,
     served: Counter,
+    _marker: PhantomData<V>,
 }
 
 impl<
@@ -171,7 +173,7 @@ where
     G::Randomness: Clone + PartialEq,
     G::Certificate: Write + EncodeSize + Read<Cfg = G::CertificateReadCfg>,
 {
-    pub fn new(context: E, cfg: Config<C, B, S, G>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, S, G>) -> (Self, Mailbox<G, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto,
@@ -198,7 +200,7 @@ where
         );
 
         // Initialize mailbox
-        let (sender, receiver) = mpsc::channel::<Message<V, D>>(cfg.mailbox_size);
+        let (sender, receiver) = mpsc::channel::<Message<G, D>>(cfg.mailbox_size);
         (
             Self {
                 context,
@@ -227,6 +229,7 @@ where
                 unfulfilled,
                 outstanding,
                 served,
+                _marker: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -421,8 +424,7 @@ where
                             self.required.remove(&Entry { task: Task::Notarization, view });
 
                             // Add notarization to cache
-                            let signing = notarization.into_signing::<G>();
-                            self.notarizations.insert(view, signing);
+                            self.notarizations.insert(view, notarization.clone());
                         }
                         Message::Nullified { nullification } => {
                             // Update current view
@@ -441,8 +443,7 @@ where
                             self.required.remove(&Entry { task: Task::Nullification, view });
 
                             // Add nullification to cache
-                            let signing = nullification.into_signing::<G>();
-                            self.nullifications.insert(view, signing);
+                            self.nullifications.insert(view, nullification.clone());
                         }
                         Message::Finalized { view } => {
                             // Update current view

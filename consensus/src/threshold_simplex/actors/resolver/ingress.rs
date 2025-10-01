@@ -1,20 +1,23 @@
 use crate::{
-    threshold_simplex::types::{Notarization, Nullification},
+    threshold_simplex::{
+        signing::{self, SigningScheme},
+        types::{Notarization, Nullification},
+    },
     types::View,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<V: Variant, D: Digest> {
+pub enum Message<G: SigningScheme, D: Digest> {
     Fetch {
         notarizations: Vec<View>,
         nullifications: Vec<View>,
     },
     Notarized {
-        notarization: Notarization<V, D>,
+        notarization: signing::Notarization<G, D>,
     },
     Nullified {
-        nullification: Nullification<V>,
+        nullification: signing::Nullification<G>,
     },
     Finalized {
         // Used to indicate when to prune old notarizations/nullifications.
@@ -23,12 +26,12 @@ pub enum Message<V: Variant, D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, D: Digest> {
-    sender: mpsc::Sender<Message<V, D>>,
+pub struct Mailbox<G: SigningScheme, D: Digest> {
+    sender: mpsc::Sender<Message<G, D>>,
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
-    pub fn new(sender: mpsc::Sender<Message<V, D>>) -> Self {
+impl<G: SigningScheme, D: Digest> Mailbox<G, D> {
+    pub fn new(sender: mpsc::Sender<Message<G, D>>) -> Self {
         Self { sender }
     }
 
@@ -42,18 +45,44 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
             .expect("Failed to send notarizations");
     }
 
-    pub async fn notarized(&mut self, notarization: Notarization<V, D>) {
+    pub async fn notarized_signing(&mut self, notarization: signing::Notarization<G, D>) {
         self.sender
             .send(Message::Notarized { notarization })
             .await
             .expect("Failed to send notarization");
     }
 
-    pub async fn nullified(&mut self, nullification: Nullification<V>) {
+    pub async fn notarized<V>(&mut self, notarization: Notarization<V, D>)
+    where
+        V: Variant,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        let signing = notarization.into_signing::<G>();
+        self.notarized_signing(signing).await;
+    }
+
+    pub async fn nullified_signing(&mut self, nullification: signing::Nullification<G>) {
         self.sender
             .send(Message::Nullified { nullification })
             .await
             .expect("Failed to send nullification");
+    }
+
+    pub async fn nullified<V>(&mut self, nullification: Nullification<V>)
+    where
+        V: Variant,
+        G: SigningScheme<
+            SignerId = u32,
+            Signature = (V::Signature, V::Signature),
+            Certificate = (V::Signature, V::Signature),
+        >,
+    {
+        let signing = nullification.into_signing::<G>();
+        self.nullified_signing(signing).await;
     }
 
     pub async fn finalized(&mut self, view: View) {

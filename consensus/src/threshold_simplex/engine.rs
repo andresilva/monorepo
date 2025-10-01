@@ -56,7 +56,7 @@ pub struct Engine<
     batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,
 
     resolver: resolver::Actor<E, C::PublicKey, B, V, D, S, G>,
-    resolver_mailbox: resolver::Mailbox<V, D>,
+    resolver_mailbox: resolver::Mailbox<G, D>,
 }
 
 impl<
@@ -134,7 +134,15 @@ where
         );
 
         // Create resolver
-        let (resolver, resolver_mailbox) = resolver::Actor::new(
+        let (resolver, resolver_mailbox) = resolver::Actor::<
+            E,
+            C::PublicKey,
+            B,
+            V,
+            D,
+            S,
+            G,
+        >::new(
             context.with_label("resolver"),
             resolver::Config {
                 blocker: cfg.blocker,
