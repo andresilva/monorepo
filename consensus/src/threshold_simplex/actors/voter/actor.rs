@@ -7,8 +7,8 @@ use crate::{
         min_active,
         signing::{self, SigningScheme, Vote, VoteContext},
         types::{
-            Activity, Attributable, Context, LegacyActivity, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Proposal, Voter,
+            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
+            Nullify, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -1757,7 +1757,8 @@ where
 
             // Alert application
             self.reporter
-                .report(Activity::from(LegacyActivity::Notarization(signing_notarization))).await;
+                .report(Activity::Notarization(signing_notarization))
+                .await;
 
             // Broadcast the notarization
             let signing_clone = notarization.clone().into_signing::<G>();
@@ -1792,7 +1793,8 @@ where
 
             // Alert application
             self.reporter
-                .report(Activity::from(LegacyActivity::Nullification(signing_nullification))).await;
+                .report(Activity::Nullification(signing_nullification))
+                .await;
 
             // Broadcast the nullification
             let signing_clone = nullification.clone().into_signing::<G>();
@@ -1908,7 +1910,8 @@ where
 
             // Alert application
             self.reporter
-                .report(Activity::from(LegacyActivity::Finalization(signing_finalization))).await;
+                .report(Activity::Finalization(signing_finalization))
+                .await;
 
             // Broadcast the finalization
             let signing_broadcast = finalization.clone().into_signing::<G>();
@@ -1992,7 +1995,7 @@ where
                             == self.crypto.public_key();
                         let proposal = notarize.proposal.clone();
                         self.handle_notarize(notarize.clone()).await;
-                        let activity = Activity::from(LegacyActivity::Notarize(notarize));
+                        let activity = Activity::Notarize(signing_notarize);
                         self.reporter.report(activity).await;
 
                         if me {
@@ -2011,8 +2014,7 @@ where
                             notarization,
                         )
                         .await;
-                        let activity =
-                            Activity::from(LegacyActivity::Notarization(signing_notarization));
+                        let activity = Activity::Notarization(signing_notarization.clone());
                         self.reporter.report(activity).await;
 
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -2025,7 +2027,7 @@ where
                             [public_key_index as usize]
                             == self.crypto.public_key();
                         self.handle_nullify(nullify.clone()).await;
-                        let activity = Activity::from(LegacyActivity::Nullify(nullify));
+                        let activity = Activity::Nullify(signing_nullify);
                         self.reporter.report(activity).await;
 
                         if me {
@@ -2040,8 +2042,7 @@ where
                             nullification,
                         )
                         .await;
-                        let activity =
-                            Activity::from(LegacyActivity::Nullification(signing_nullification));
+                        let activity = Activity::Nullification(signing_nullification.clone());
                         self.reporter.report(activity).await;
 
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -2054,7 +2055,7 @@ where
                             [public_key_index as usize]
                             == self.crypto.public_key();
                         self.handle_finalize(finalize.clone()).await;
-                        let activity = Activity::from(LegacyActivity::Finalize(finalize));
+                        let activity = Activity::Finalize(signing_finalize);
                         self.reporter.report(activity).await;
 
                         if me {
@@ -2069,8 +2070,7 @@ where
                             finalization,
                         )
                         .await;
-                        let activity =
-                            Activity::from(LegacyActivity::Finalization(signing_finalization));
+                        let activity = Activity::Finalization(signing_finalization.clone());
                         self.reporter.report(activity).await;
 
                         let round = self.views.get_mut(&view).expect("missing round");

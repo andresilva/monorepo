@@ -6,8 +6,8 @@ use crate::{
         metrics::Inbound,
         signing::{self, SigningScheme},
         types::{
-            Activity, BatchVerifier, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize, Nullify,
-            NullifyFinalize, Voter,
+            Activity, BatchVerifier, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
+            Nullify, NullifyFinalize, Voter,
         },
     },
     types::{Epoch, View},
@@ -51,8 +51,7 @@ struct Round<
     blocker: B,
     reporter: R,
     supervisor: S,
-    signing: G,
-    verifier: BatchVerifier<V, D, G>,
+    verifier: BatchVerifier<D, G>,
     notarizes: Vec<Option<signing::Notarize<G, D>>>,
     nullifies: Vec<Option<signing::Nullify<G>>>,
     finalizes: Vec<Option<signing::Finalize<G, D>>>,
@@ -101,15 +100,13 @@ where
         };
 
         // Initialize data structures
-        let signing_clone = signing.clone();
         Self {
             view,
 
             blocker,
             reporter,
             supervisor,
-            signing,
-            verifier: BatchVerifier::<V, D, G>::new(quorum, Some(signing_clone)),
+            verifier: BatchVerifier::<D, G>::new(quorum, signing),
 
             notarizes: vec![None; participants],
             nullifies: vec![None; participants],
@@ -165,7 +162,7 @@ where
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
                         self.notarizes[index as usize] = Some(notarize.clone());
-                        self.verifier.add_signing(Voter::Notarize(notarize), false);
+                        self.verifier.add(Voter::Notarize(notarize), false);
                         true
                     }
                 }
@@ -185,10 +182,7 @@ where
                     let legacy_nullify: Nullify<V> = Nullify::from_signing::<G>(nullify.clone());
                     let legacy_finalize: Finalize<V, D> =
                         Finalize::from_signing::<G>(previous.clone());
-                    let activity = NullifyFinalize::new(
-                        legacy_nullify,
-                        legacy_finalize,
-                    );
+                    let activity = NullifyFinalize::new(legacy_nullify, legacy_finalize);
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
@@ -219,7 +213,7 @@ where
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
                         self.nullifies[index as usize] = Some(nullify.clone());
-                        self.verifier.add_signing(Voter::Nullify(nullify), false);
+                        self.verifier.add(Voter::Nullify(nullify), false);
                         true
                     }
                 }
@@ -262,7 +256,7 @@ where
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
                         self.finalizes[index as usize] = Some(finalize.clone());
-                        self.verifier.add_signing(Voter::Finalize(finalize), false);
+                        self.verifier.add(Voter::Finalize(finalize), false);
                         true
                     }
                 }
@@ -302,7 +296,7 @@ where
                 unreachable!("recovered messages should be sent to batcher");
             }
         }
-        self.verifier.add_signing(message, true);
+        self.verifier.add(message, true);
     }
 
     fn set_leader(&mut self, leader: u32) {
@@ -314,8 +308,7 @@ where
     }
 
     fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
-        let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_notarizes(namespace, polynomial)
+        self.verifier.verify_notarizes(namespace)
     }
 
     fn ready_nullifies(&self) -> bool {
@@ -323,8 +316,7 @@ where
     }
 
     fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
-        let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_nullifies(namespace, polynomial)
+        self.verifier.verify_nullifies(namespace)
     }
 
     fn ready_finalizes(&self) -> bool {
@@ -332,8 +324,7 @@ where
     }
 
     fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
-        let polynomial = self.supervisor.polynomial(self.view).unwrap();
-        self.verifier.verify_finalizes(namespace, polynomial)
+        self.verifier.verify_finalizes(namespace)
     }
 
     fn is_active(&self, leader: &C) -> Option<bool> {
@@ -475,8 +466,7 @@ where
         receiver: impl Receiver<PublicKey = C>,
     ) {
         // Wrap channel
-        let mut receiver: WrappedReceiver<_, Voter<G, D>> =
-            WrappedReceiver::new((), receiver);
+        let mut receiver: WrappedReceiver<_, Voter<G, D>> = WrappedReceiver::new((), receiver);
 
         // Initialize view data structures
         let mut current: View = 0;

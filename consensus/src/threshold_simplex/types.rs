@@ -25,7 +25,6 @@ use commonware_utils::union;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
-    marker::PhantomData,
 };
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -117,13 +116,8 @@ pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
 pub struct BatchVerifier<
-    V: Variant,
     D: Digest,
-    G: SigningScheme<
-        SignerId = u32,
-        Signature = (V::Signature, V::Signature),
-        Certificate = (V::Signature, V::Signature),
-    >,
+    G: SigningScheme<SignerId = u32>,
 > {
     quorum: Option<usize>,
 
@@ -140,19 +134,10 @@ pub struct BatchVerifier<
     finalizes: Vec<signing::Finalize<G, D>>,
     finalizes_verified: usize,
 
-    signing: Option<G>,
-    _phantom: PhantomData<V>,
+    signing: G,
 }
 
-impl<
-        V: Variant,
-        D: Digest,
-        G: SigningScheme<
-            SignerId = u32,
-            Signature = (V::Signature, V::Signature),
-            Certificate = (V::Signature, V::Signature),
-        >,
-    > BatchVerifier<V, D, G>
+impl<D: Digest, G: SigningScheme<SignerId = u32>> BatchVerifier<D, G>
 {
     /// Creates a new `BatchVerifier`.
     ///
@@ -161,7 +146,7 @@ impl<
     /// * `quorum` - An optional `u32` specifying the number of votes (2f+1)
     ///   required to reach a quorum. If `None`, batch verification readiness
     ///   checks based on quorum size are skipped.
-    pub fn new(quorum: Option<u32>, signing: Option<G>) -> Self {
+    pub fn new(quorum: Option<u32>, signing: G) -> Self {
         Self {
             quorum: quorum.map(|q| q as usize),
 
@@ -179,7 +164,6 @@ impl<
             finalizes_verified: 0,
 
             signing,
-            _phantom: PhantomData,
         }
     }
 
@@ -216,11 +200,7 @@ impl<
     ///
     /// * `msg` - The [Voter] message to add.
     /// * `verified` - A boolean indicating if the message has already been verified.
-    pub fn add(&mut self, msg: LegacyVoter<V, D>, verified: bool) {
-        self.add_signing(msg.into(), verified);
-    }
-
-    pub fn add_signing(&mut self, msg: Voter<G, D>, verified: bool) {
+    pub fn add(&mut self, msg: Voter<G, D>, verified: bool) {
         match msg {
             Voter::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
@@ -313,11 +293,7 @@ impl<
     /// A tuple containing:
     /// * A `Vec<Voter<G, D>>` of successfully verified [Voter::Notarize] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_notarizes(
-        &mut self,
-        namespace: &[u8],
-        polynomial: &[V::Public],
-    ) -> (Vec<Voter<G, D>>, Vec<u32>) {
+    pub fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
         self.notarizes_force = false;
         let pending = std::mem::take(&mut self.notarizes);
 
@@ -325,80 +301,68 @@ impl<
             return (Vec::new(), Vec::new());
         }
 
-        if let Some(signing) = self.signing.as_ref() {
-            let mut by_signer: BTreeMap<u32, Vec<signing::Notarize<G, D>>> = BTreeMap::new();
-            for notarize in pending {
-                by_signer
-                    .entry(notarize.signer())
-                    .or_default()
-                    .push(notarize);
-            }
-
-            let first_proposal = by_signer
-                .values()
-                .next()
-                .expect("notarize map must be non-empty")
-                .first()
-                .expect("notarize list must be non-empty")
-                .proposal
-                .clone();
-
-            let votes: Vec<Vote<G>> = by_signer
-                .values()
-                .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
-                .collect();
-
-            let verification = signing.verify_votes::<D, _>(
-                VoteContext::Notarize {
-                    namespace,
-                    proposal: &first_proposal,
-                },
-                votes,
-            );
-
-            let mut verified = Vec::new();
-
-            for vote in verification.verified {
-                let signer = vote.signer.clone();
-                if let Some(entries) = by_signer.get_mut(&signer) {
-                    if let Some(mut notarize) = entries.pop() {
-                        notarize.vote = vote;
-                        verified.push(notarize);
-                    }
-                    if entries.is_empty() {
-                        by_signer.remove(&signer);
-                    }
-                }
-            }
-
-            let mut failed: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
-            failed.extend(by_signer.into_keys());
-
-            self.notarizes_verified += verified.len();
-
-            let voters = verified
-                .into_iter()
-                .map(Voter::Notarize)
-                .collect();
-
-            return (voters, failed.into_iter().collect());
+        let mut by_signer: BTreeMap<u32, Vec<signing::Notarize<G, D>>> = BTreeMap::new();
+        for notarize in pending {
+            by_signer
+                .entry(notarize.signer())
+                .or_default()
+                .push(notarize);
         }
 
-        // Fallback to legacy verification when no signing scheme is available.
-        let pending_legacy: Vec<LegacyNotarize<V, D>> = pending
-            .into_iter()
-            .map(LegacyNotarize::from_signing::<G>)
+        let first_proposal = by_signer
+            .values()
+            .next()
+            .expect("notarize map must be non-empty")
+            .first()
+            .expect("notarize list must be non-empty")
+            .proposal
+            .clone();
+
+        let votes: Vec<Vote<G>> = by_signer
+            .values()
+            .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
             .collect();
-        let (notarizes, failed) =
-            LegacyNotarize::verify_multiple(namespace, polynomial, pending_legacy);
-        self.notarizes_verified += notarizes.len();
-        (
-            notarizes
-                .into_iter()
-                .map(|legacy| Voter::Notarize(legacy.into_signing::<G>()))
-                .collect(),
-            failed,
-        )
+
+        let verification = self.signing.verify_votes::<D, _>(
+            VoteContext::Notarize {
+                namespace,
+                proposal: &first_proposal,
+            },
+            votes,
+        );
+
+        let mut verified = Vec::new();
+
+        for vote in verification.verified {
+            let Vote { signer, signature } = vote;
+            if let Some(entries) = by_signer.get_mut(&signer) {
+                if let Some(mut notarize) = entries.pop() {
+                    notarize.vote = Vote {
+                        signer,
+                        signature,
+                    };
+                    verified.push(notarize);
+                }
+                if entries.is_empty() {
+                    by_signer.remove(&signer);
+                }
+            }
+        }
+
+        let mut failed: BTreeSet<u32> = verification
+            .invalid_signers
+            .into_iter()
+            .collect();
+        failed.extend(by_signer.into_keys());
+
+        self.notarizes_verified += verified.len();
+
+        let voters = verified
+            .into_iter()
+            .map(Voter::Notarize)
+            .collect();
+
+        (voters, failed.into_iter().collect())
     }
 
     /// Checks if there are [Voter::Notarize] messages ready for batch verification.
@@ -464,86 +428,65 @@ impl<
     /// A tuple containing:
     /// * A `Vec<Voter<G, D>>` of successfully verified [Voter::Nullify] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_nullifies(
-        &mut self,
-        namespace: &[u8],
-        polynomial: &[V::Public],
-    ) -> (Vec<Voter<G, D>>, Vec<u32>) {
+    pub fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
         let pending = std::mem::take(&mut self.nullifies);
 
         if pending.is_empty() {
             return (Vec::new(), Vec::new());
         }
 
-        if let Some(signing) = self.signing.as_ref() {
-            let mut by_signer: BTreeMap<u32, Vec<signing::Nullify<G>>> = BTreeMap::new();
-            for nullify in pending {
-                by_signer.entry(nullify.signer()).or_default().push(nullify);
-            }
-
-            let first_round = by_signer
-                .values()
-                .next()
-                .expect("nullify map must be non-empty")
-                .first()
-                .expect("nullify list must be non-empty")
-                .round;
-
-            let votes: Vec<Vote<G>> = by_signer
-                .values()
-                .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
-                .collect();
-
-            let verification = signing.verify_votes::<D, _>(
-                VoteContext::Nullify {
-                    namespace,
-                    round: first_round,
-                },
-                votes,
-            );
-
-            let mut verified = Vec::new();
-
-            for vote in verification.verified {
-                let signer = vote.signer.clone();
-                if let Some(entries) = by_signer.get_mut(&signer) {
-                    if let Some(mut nullify) = entries.pop() {
-                        nullify.vote = vote;
-                        verified.push(nullify);
-                    }
-                    if entries.is_empty() {
-                        by_signer.remove(&signer);
-                    }
-                }
-            }
-
-            let mut failed: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
-            failed.extend(by_signer.into_keys());
-
-            self.nullifies_verified += verified.len();
-
-            let voters = verified
-                .into_iter()
-                .map(Voter::Nullify)
-                .collect();
-
-            return (voters, failed.into_iter().collect());
+        let mut by_signer: BTreeMap<u32, Vec<signing::Nullify<G>>> = BTreeMap::new();
+        for nullify in pending {
+            by_signer.entry(nullify.signer()).or_default().push(nullify);
         }
 
-        let pending_legacy: Vec<LegacyNullify<V>> = pending
-            .into_iter()
-            .map(LegacyNullify::from_signing::<G>)
+        let first_round = by_signer
+            .values()
+            .next()
+            .expect("nullify map must be non-empty")
+            .first()
+            .expect("nullify list must be non-empty")
+            .round;
+
+        let votes: Vec<Vote<G>> = by_signer
+            .values()
+            .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
             .collect();
-        let (nullifies, failed) =
-            LegacyNullify::verify_multiple(namespace, polynomial, pending_legacy);
-        self.nullifies_verified += nullifies.len();
-        (
-            nullifies
-                .into_iter()
-                .map(|legacy| Voter::Nullify(legacy.into_signing::<G>()))
-                .collect(),
-            failed,
-        )
+
+        let verification = self.signing.verify_votes::<D, _>(
+            VoteContext::Nullify {
+                namespace,
+                round: first_round,
+            },
+            votes,
+        );
+
+        let mut verified = Vec::new();
+
+        for vote in verification.verified {
+            let Vote { signer, signature } = vote;
+            if let Some(entries) = by_signer.get_mut(&signer) {
+                if let Some(mut nullify) = entries.pop() {
+                    nullify.vote = Vote { signer, signature };
+                    verified.push(nullify);
+                }
+                if entries.is_empty() {
+                    by_signer.remove(&signer);
+                }
+            }
+        }
+
+        let mut failed: BTreeSet<u32> = verification
+            .invalid_signers
+            .into_iter()
+            .collect();
+        failed.extend(by_signer.into_keys());
+
+        self.nullifies_verified += verified.len();
+
+        let voters = verified.into_iter().map(Voter::Nullify).collect();
+
+        (voters, failed.into_iter().collect())
     }
 
     /// Checks if there are [Voter::Nullify] messages ready for batch verification.
@@ -594,90 +537,66 @@ impl<
     /// A tuple containing:
     /// * A `Vec<Voter<G, D>>` of successfully verified [Voter::Finalize] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_finalizes(
-        &mut self,
-        namespace: &[u8],
-        polynomial: &[V::Public],
-    ) -> (Vec<Voter<G, D>>, Vec<u32>) {
+    pub fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<G, D>>, Vec<u32>) {
         let pending = std::mem::take(&mut self.finalizes);
 
         if pending.is_empty() {
             return (Vec::new(), Vec::new());
         }
 
-        if let Some(signing) = self.signing.as_ref() {
-            let mut by_signer: BTreeMap<u32, Vec<signing::Finalize<G, D>>> = BTreeMap::new();
-            for finalize in pending {
-                by_signer
-                    .entry(finalize.signer())
-                    .or_default()
-                    .push(finalize);
-            }
-
-            let first_proposal = by_signer
-                .values()
-                .next()
-                .expect("finalize map must be non-empty")
-                .first()
-                .expect("finalize list must be non-empty")
-                .proposal
-                .clone();
-
-            let votes: Vec<Vote<G>> = by_signer
-                .values()
-                .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
-                .collect();
-
-            let verification = signing.verify_votes::<D, _>(
-                VoteContext::Finalize {
-                    namespace,
-                    proposal: &first_proposal,
-                },
-                votes,
-            );
-
-            let mut verified = Vec::new();
-
-            for vote in verification.verified {
-                let signer = vote.signer.clone();
-                if let Some(entries) = by_signer.get_mut(&signer) {
-                    if let Some(mut finalize) = entries.pop() {
-                        finalize.vote = vote;
-                        verified.push(finalize);
-                    }
-                    if entries.is_empty() {
-                        by_signer.remove(&signer);
-                    }
-                }
-            }
-
-            let mut failed: BTreeSet<u32> = verification.invalid_signers.into_iter().collect();
-            failed.extend(by_signer.into_keys());
-
-            self.finalizes_verified += verified.len();
-
-            let voters = verified
-                .into_iter()
-                .map(Voter::Finalize)
-                .collect();
-
-            return (voters, failed.into_iter().collect());
+        let mut by_signer: BTreeMap<u32, Vec<signing::Finalize<G, D>>> = BTreeMap::new();
+        for finalize in pending {
+            by_signer.entry(finalize.signer()).or_default().push(finalize);
         }
 
-        let pending_legacy: Vec<LegacyFinalize<V, D>> = pending
-            .into_iter()
-            .map(LegacyFinalize::from_signing::<G>)
+        let first_proposal = by_signer
+            .values()
+            .next()
+            .expect("finalize map must be non-empty")
+            .first()
+            .expect("finalize list must be non-empty")
+            .proposal
+            .clone();
+
+        let votes: Vec<Vote<G>> = by_signer
+            .values()
+            .flat_map(|entries| entries.iter().map(|n| n.vote.clone()))
             .collect();
-        let (finalizes, failed) =
-            LegacyFinalize::verify_multiple(namespace, polynomial, pending_legacy);
-        self.finalizes_verified += finalizes.len();
-        (
-            finalizes
-                .into_iter()
-                .map(|legacy| Voter::Finalize(legacy.into_signing::<G>()))
-                .collect(),
-            failed,
-        )
+
+        let verification = self.signing.verify_votes::<D, _>(
+            VoteContext::Finalize {
+                namespace,
+                proposal: &first_proposal,
+            },
+            votes,
+        );
+
+        let mut verified = Vec::new();
+
+        for vote in verification.verified {
+            let Vote { signer, signature } = vote;
+            if let Some(entries) = by_signer.get_mut(&signer) {
+                if let Some(mut finalize) = entries.pop() {
+                    finalize.vote = Vote { signer, signature };
+                    verified.push(finalize);
+                }
+                if entries.is_empty() {
+                    by_signer.remove(&signer);
+                }
+            }
+        }
+
+        let mut failed: BTreeSet<u32> = verification
+            .invalid_signers
+            .into_iter()
+            .collect();
+        failed.extend(by_signer.into_keys());
+
+        self.finalizes_verified += verified.len();
+
+        let voters = verified.into_iter().map(Voter::Finalize).collect();
+
+        (voters, failed.into_iter().collect())
     }
 
     /// Checks if there are [Voter::Finalize] messages ready for batch verification.
@@ -719,143 +638,6 @@ impl<
         true
     }
 }
-
-/// Voter represents all possible message types that can be sent by validators
-/// in the consensus protocol.
-#[derive(Clone, Debug, PartialEq)]
-pub enum LegacyVoter<V: Variant, D: Digest> {
-    /// A single validator notarize over a proposal
-    Notarize(Notarize<V, D>),
-    /// A recovered threshold signature for a notarization
-    Notarization(Notarization<V, D>),
-    /// A single validator nullify to skip the current view (usually when leader is unresponsive)
-    Nullify(Nullify<V>),
-    /// A recovered threshold signature for a nullification
-    Nullification(Nullification<V>),
-    /// A single validator finalize over a proposal
-    Finalize(Finalize<V, D>),
-    /// A recovered threshold signature for a finalization
-    Finalization(Finalization<V, D>),
-}
-
-impl<V: Variant, D: Digest> Write for LegacyVoter<V, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            LegacyVoter::Notarize(v) => {
-                0u8.write(writer);
-                v.write(writer);
-            }
-            LegacyVoter::Notarization(v) => {
-                1u8.write(writer);
-                v.write(writer);
-            }
-            LegacyVoter::Nullify(v) => {
-                2u8.write(writer);
-                v.write(writer);
-            }
-            LegacyVoter::Nullification(v) => {
-                3u8.write(writer);
-                v.write(writer);
-            }
-            LegacyVoter::Finalize(v) => {
-                4u8.write(writer);
-                v.write(writer);
-            }
-            LegacyVoter::Finalization(v) => {
-                5u8.write(writer);
-                v.write(writer);
-            }
-        }
-    }
-}
-
-impl<V: Variant, D: Digest> EncodeSize for LegacyVoter<V, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            LegacyVoter::Notarize(v) => v.encode_size(),
-            LegacyVoter::Notarization(v) => v.encode_size(),
-            LegacyVoter::Nullify(v) => v.encode_size(),
-            LegacyVoter::Nullification(v) => v.encode_size(),
-            LegacyVoter::Finalize(v) => v.encode_size(),
-            LegacyVoter::Finalization(v) => v.encode_size(),
-        }
-    }
-}
-
-impl<V: Variant, D: Digest> Read for LegacyVoter<V, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let v = Notarize::read(reader)?;
-                Ok(LegacyVoter::Notarize(v))
-            }
-            1 => {
-                let v = Notarization::read(reader)?;
-                Ok(LegacyVoter::Notarization(v))
-            }
-            2 => {
-                let v = Nullify::read(reader)?;
-                Ok(LegacyVoter::Nullify(v))
-            }
-            3 => {
-                let v = Nullification::read(reader)?;
-                Ok(LegacyVoter::Nullification(v))
-            }
-            4 => {
-                let v = Finalize::read(reader)?;
-                Ok(LegacyVoter::Finalize(v))
-            }
-            5 => {
-                let v = Finalization::read(reader)?;
-                Ok(LegacyVoter::Finalization(v))
-            }
-            _ => Err(Error::Invalid(
-                "consensus::threshold_simplex::Voter",
-                "Invalid type",
-            )),
-        }
-    }
-}
-
-impl<V: Variant, D: Digest> Epochable for LegacyVoter<V, D> {
-    type Epoch = Epoch;
-
-    fn epoch(&self) -> Epoch {
-        match self {
-            LegacyVoter::Notarize(v) => v.epoch(),
-            LegacyVoter::Notarization(v) => v.epoch(),
-            LegacyVoter::Nullify(v) => v.epoch(),
-            LegacyVoter::Nullification(v) => v.epoch(),
-            LegacyVoter::Finalize(v) => v.epoch(),
-            LegacyVoter::Finalization(v) => v.epoch(),
-        }
-    }
-}
-
-impl<V: Variant, D: Digest> Viewable for LegacyVoter<V, D> {
-    type View = View;
-
-    fn view(&self) -> View {
-        match self {
-            LegacyVoter::Notarize(v) => v.view(),
-            LegacyVoter::Notarization(v) => v.view(),
-            LegacyVoter::Nullify(v) => v.view(),
-            LegacyVoter::Nullification(v) => v.view(),
-            LegacyVoter::Finalize(v) => v.view(),
-            LegacyVoter::Finalization(v) => v.view(),
-        }
-    }
-}
-
-type LegacyNotarize<V, D> = Notarize<V, D>;
-type LegacyNotarization<V, D> = Notarization<V, D>;
-type LegacyNullify<V> = Nullify<V>;
-type LegacyNullification<V> = Nullification<V>;
-type LegacyFinalize<V, D> = Finalize<V, D>;
-type LegacyFinalization<V, D> = Finalization<V, D>;
 
 /// Signing-native voter message used by the new simplex pipeline.
 #[derive(Clone)]
@@ -906,92 +688,6 @@ impl<G: SigningScheme, D: Digest> Voter<G, D> {
             Voter::Nullify(v) => Some(v.vote.signer.clone()),
             Voter::Finalize(v) => Some(v.vote.signer.clone()),
             _ => None,
-        }
-    }
-}
-
-impl<V, D, G> From<LegacyVoter<V, D>> for Voter<G, D>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme<
-        SignerId = u32,
-        Signature = (V::Signature, V::Signature),
-        Certificate = (V::Signature, V::Signature),
-    >,
-{
-    fn from(voter: LegacyVoter<V, D>) -> Self {
-        match voter {
-            LegacyVoter::Notarize(v) => {
-                let signer = v.proposal_signature.index;
-                let proposal_signature = v.proposal_signature.value;
-                let seed_signature = v.seed_signature.value;
-                let proposal = v.proposal;
-                Voter::Notarize(signing::Notarize {
-                    proposal,
-                    vote: Vote {
-                        signer,
-                        signature: (proposal_signature, seed_signature),
-                    },
-                })
-            }
-            LegacyVoter::Notarization(v) => Voter::Notarization(v.into_signing::<G>()),
-            LegacyVoter::Nullify(v) => {
-                let signer = v.view_signature.index;
-                let view_signature = v.view_signature.value;
-                let seed_signature = v.seed_signature.value;
-                let round = v.round;
-                Voter::Nullify(signing::Nullify {
-                    round,
-                    vote: Vote {
-                        signer,
-                        signature: (view_signature, seed_signature),
-                    },
-                })
-            }
-            LegacyVoter::Nullification(v) => Voter::Nullification(v.into_signing::<G>()),
-            LegacyVoter::Finalize(v) => {
-                let signer = v.proposal_signature.index;
-                let proposal_signature = v.proposal_signature.value;
-                let seed_signature = v.seed_signature.value;
-                let proposal = v.proposal;
-                Voter::Finalize(signing::Finalize {
-                    proposal,
-                    vote: Vote {
-                        signer,
-                        signature: (proposal_signature, seed_signature),
-                    },
-                })
-            }
-            LegacyVoter::Finalization(v) => Voter::Finalization(v.into_signing::<G>()),
-        }
-    }
-}
-
-impl<V, D, G> From<Voter<G, D>> for LegacyVoter<V, D>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme<
-        SignerId = u32,
-        Signature = (V::Signature, V::Signature),
-        Certificate = (V::Signature, V::Signature),
-    >,
-{
-    fn from(voter: Voter<G, D>) -> Self {
-        match voter {
-            Voter::Notarize(v) => LegacyVoter::Notarize(LegacyNotarize::from_signing::<G>(v)),
-            Voter::Notarization(v) => {
-                LegacyVoter::Notarization(LegacyNotarization::from_signing::<G>(v))
-            }
-            Voter::Nullify(v) => LegacyVoter::Nullify(LegacyNullify::from_signing::<G>(v)),
-            Voter::Nullification(v) => {
-                LegacyVoter::Nullification(LegacyNullification::from_signing::<G>(v))
-            }
-            Voter::Finalize(v) => LegacyVoter::Finalize(LegacyFinalize::from_signing::<G>(v)),
-            Voter::Finalization(v) => {
-                LegacyVoter::Finalization(LegacyFinalization::from_signing::<G>(v))
-            }
         }
     }
 }
@@ -2814,235 +2510,6 @@ impl<G: SigningScheme, D: Digest> Read for Response<G, D> {
 /// Some activities issued by consensus are not verified. To determine if an activity has been verified,
 /// use the `verified` method.
 ///
-/// # Warning
-///
-/// After collecting `t` [PartialSignature]s for the same [Activity], an attacker can derive
-/// the [PartialSignature] for the `n-t` remaining participants.
-///
-/// For this reason, it is not sound to use [PartialSignature]-backed [Activity] to reward participants
-/// for their contributions (as an attacker, for example, could forge contributions from offline participants).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum LegacyActivity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme,
-{
-    /// A single validator notarize over a proposal
-    Notarize(Notarize<V, D>),
-    /// A threshold signature for a notarization
-    Notarization(signing::Notarization<G, D>),
-    /// A single validator nullify to skip the current view
-    Nullify(Nullify<V>),
-    /// A threshold signature for a nullification
-    Nullification(signing::Nullification<G>),
-    /// A single validator finalize over a proposal
-    Finalize(Finalize<V, D>),
-    /// A threshold signature for a finalization
-    Finalization(signing::Finalization<G, D>),
-    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
-    ConflictingNotarize(ConflictingNotarize<V, D>),
-    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
-    ConflictingFinalize(ConflictingFinalize<V, D>),
-    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
-    NullifyFinalize(NullifyFinalize<V, D>),
-}
-
-impl<V, D, G> LegacyActivity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme,
-{
-    /// Indicates whether the activity has been verified by consensus.
-    pub fn verified(&self) -> bool {
-        match self {
-            LegacyActivity::Notarize(_) => false,
-            LegacyActivity::Notarization(_) => true,
-            LegacyActivity::Nullify(_) => false,
-            LegacyActivity::Nullification(_) => true,
-            LegacyActivity::Finalize(_) => false,
-            LegacyActivity::Finalization(_) => true,
-            LegacyActivity::ConflictingNotarize(_) => false,
-            LegacyActivity::ConflictingFinalize(_) => false,
-            LegacyActivity::NullifyFinalize(_) => false,
-        }
-    }
-}
-
-impl<V, D, G> Write for LegacyActivity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme,
-    G::Certificate: Write,
-{
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            LegacyActivity::Notarize(v) => {
-                0u8.write(writer);
-                v.write(writer);
-            }
-            LegacyActivity::Notarization(v) => {
-                1u8.write(writer);
-                v.write(writer);
-            }
-            LegacyActivity::Nullify(v) => {
-                2u8.write(writer);
-                v.write(writer);
-            }
-            LegacyActivity::Nullification(v) => {
-                3u8.write(writer);
-                v.write(writer);
-            }
-            LegacyActivity::Finalize(v) => {
-                4u8.write(writer);
-                v.write(writer);
-            }
-            LegacyActivity::Finalization(v) => {
-                5u8.write(writer);
-                v.write(writer);
-            }
-            LegacyActivity::ConflictingNotarize(v) => {
-                6u8.write(writer);
-                v.write(writer);
-            }
-            LegacyActivity::ConflictingFinalize(v) => {
-                7u8.write(writer);
-                v.write(writer);
-            }
-            LegacyActivity::NullifyFinalize(v) => {
-                8u8.write(writer);
-                v.write(writer);
-            }
-        }
-    }
-}
-
-impl<V, D, G> EncodeSize for LegacyActivity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme,
-    G::Certificate: EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            LegacyActivity::Notarize(v) => v.encode_size(),
-            LegacyActivity::Notarization(v) => v.encode_size(),
-            LegacyActivity::Nullify(v) => v.encode_size(),
-            LegacyActivity::Nullification(v) => v.encode_size(),
-            LegacyActivity::Finalize(v) => v.encode_size(),
-            LegacyActivity::Finalization(v) => v.encode_size(),
-            LegacyActivity::ConflictingNotarize(v) => v.encode_size(),
-            LegacyActivity::ConflictingFinalize(v) => v.encode_size(),
-            LegacyActivity::NullifyFinalize(v) => v.encode_size(),
-        }
-    }
-}
-
-impl<V, D, G> Read for LegacyActivity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme,
-    G::Certificate: Read<Cfg = G::CertificateReadCfg>,
-{
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let v = Notarize::<V, D>::read(reader)?;
-                Ok(LegacyActivity::Notarize(v))
-            }
-            1 => {
-                let v = signing::Notarization::<G, D>::read(reader)?;
-                Ok(LegacyActivity::Notarization(v))
-            }
-            2 => {
-                let v = Nullify::<V>::read(reader)?;
-                Ok(LegacyActivity::Nullify(v))
-            }
-            3 => {
-                let v = signing::Nullification::<G>::read(reader)?;
-                Ok(LegacyActivity::Nullification(v))
-            }
-            4 => {
-                let v = Finalize::<V, D>::read(reader)?;
-                Ok(LegacyActivity::Finalize(v))
-            }
-            5 => {
-                let v = signing::Finalization::<G, D>::read(reader)?;
-                Ok(LegacyActivity::Finalization(v))
-            }
-            6 => {
-                let v = ConflictingNotarize::<V, D>::read(reader)?;
-                Ok(LegacyActivity::ConflictingNotarize(v))
-            }
-            7 => {
-                let v = ConflictingFinalize::<V, D>::read(reader)?;
-                Ok(LegacyActivity::ConflictingFinalize(v))
-            }
-            8 => {
-                let v = NullifyFinalize::<V, D>::read(reader)?;
-                Ok(LegacyActivity::NullifyFinalize(v))
-            }
-            _ => Err(Error::Invalid(
-                "consensus::threshold_simplex::Activity",
-                "Invalid type",
-            )),
-        }
-    }
-}
-
-impl<V, D, G> Epochable for LegacyActivity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme,
-{
-    type Epoch = Epoch;
-
-    fn epoch(&self) -> Epoch {
-        match self {
-            LegacyActivity::Notarize(v) => v.epoch(),
-            LegacyActivity::Notarization(v) => v.epoch(),
-            LegacyActivity::Nullify(v) => v.epoch(),
-            LegacyActivity::Nullification(v) => v.epoch(),
-            LegacyActivity::Finalize(v) => v.epoch(),
-            LegacyActivity::Finalization(v) => v.epoch(),
-            LegacyActivity::ConflictingNotarize(v) => v.epoch(),
-            LegacyActivity::ConflictingFinalize(v) => v.epoch(),
-            LegacyActivity::NullifyFinalize(v) => v.epoch(),
-        }
-    }
-}
-
-impl<V, D, G> Viewable for LegacyActivity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme,
-{
-    type View = View;
-
-    fn view(&self) -> View {
-        match self {
-            LegacyActivity::Notarize(v) => v.view(),
-            LegacyActivity::Notarization(v) => v.view(),
-            LegacyActivity::Nullify(v) => v.view(),
-            LegacyActivity::Nullification(v) => v.view(),
-            LegacyActivity::Finalize(v) => v.view(),
-            LegacyActivity::Finalization(v) => v.view(),
-            LegacyActivity::ConflictingNotarize(v) => v.view(),
-            LegacyActivity::ConflictingFinalize(v) => v.view(),
-            LegacyActivity::NullifyFinalize(v) => v.view(),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub enum Activity<V, D, G>
 where
@@ -3072,92 +2539,6 @@ where
             self,
             Activity::Notarization(_) | Activity::Nullification(_) | Activity::Finalization(_)
         )
-    }
-}
-
-impl<V, D, G> From<LegacyActivity<V, D, G>> for Activity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme<
-        SignerId = u32,
-        Signature = (V::Signature, V::Signature),
-        Certificate = (V::Signature, V::Signature),
-    >,
-{
-    fn from(activity: LegacyActivity<V, D, G>) -> Self {
-        match activity {
-            LegacyActivity::Notarize(v) => {
-                let signer = v.proposal_signature.index;
-                let proposal_signature = v.proposal_signature.value;
-                let seed_signature = v.seed_signature.value;
-                let proposal = v.proposal;
-                Activity::Notarize(signing::Notarize {
-                    proposal,
-                    vote: Vote {
-                        signer,
-                        signature: (proposal_signature, seed_signature),
-                    },
-                })
-            }
-            LegacyActivity::Notarization(v) => Activity::Notarization(v),
-            LegacyActivity::Nullify(v) => {
-                let signer = v.view_signature.index;
-                let view_signature = v.view_signature.value;
-                let seed_signature = v.seed_signature.value;
-                let round = v.round;
-                Activity::Nullify(signing::Nullify {
-                    round,
-                    vote: Vote {
-                        signer,
-                        signature: (view_signature, seed_signature),
-                    },
-                })
-            }
-            LegacyActivity::Nullification(v) => Activity::Nullification(v),
-            LegacyActivity::Finalize(v) => {
-                let signer = v.proposal_signature.index;
-                let proposal_signature = v.proposal_signature.value;
-                let seed_signature = v.seed_signature.value;
-                let proposal = v.proposal;
-                Activity::Finalize(signing::Finalize {
-                    proposal,
-                    vote: Vote {
-                        signer,
-                        signature: (proposal_signature, seed_signature),
-                    },
-                })
-            }
-            LegacyActivity::Finalization(v) => Activity::Finalization(v),
-            LegacyActivity::ConflictingNotarize(v) => Activity::ConflictingNotarize(v),
-            LegacyActivity::ConflictingFinalize(v) => Activity::ConflictingFinalize(v),
-            LegacyActivity::NullifyFinalize(v) => Activity::NullifyFinalize(v),
-        }
-    }
-}
-
-impl<V, D, G> From<Activity<V, D, G>> for LegacyActivity<V, D, G>
-where
-    V: Variant,
-    D: Digest,
-    G: SigningScheme<
-        SignerId = u32,
-        Signature = (V::Signature, V::Signature),
-        Certificate = (V::Signature, V::Signature),
-    >,
-{
-    fn from(activity: Activity<V, D, G>) -> Self {
-        match activity {
-            Activity::Notarize(v) => LegacyActivity::Notarize(LegacyNotarize::from_signing::<G>(v)),
-            Activity::Notarization(v) => LegacyActivity::Notarization(v),
-            Activity::Nullify(v) => LegacyActivity::Nullify(LegacyNullify::from_signing::<G>(v)),
-            Activity::Nullification(v) => LegacyActivity::Nullification(v),
-            Activity::Finalize(v) => LegacyActivity::Finalize(LegacyFinalize::from_signing::<G>(v)),
-            Activity::Finalization(v) => LegacyActivity::Finalization(v),
-            Activity::ConflictingNotarize(v) => LegacyActivity::ConflictingNotarize(v),
-            Activity::ConflictingFinalize(v) => LegacyActivity::ConflictingFinalize(v),
-            Activity::NullifyFinalize(v) => LegacyActivity::NullifyFinalize(v),
-        }
     }
 }
 
@@ -3813,6 +3194,27 @@ mod tests {
         let identity = poly::public::<MinSig>(&polynomial);
         let polynomial = evaluate_all::<MinSig>(&polynomial, n);
         (*identity, polynomial, shares)
+    }
+
+    fn make_scheme(
+        identity: &<MinSig as Variant>::Public,
+        polynomial: &[<MinSig as Variant>::Public],
+        share: &Share,
+        threshold: u32,
+    ) -> BlsThresholdScheme<MinSig> {
+        BlsThresholdScheme::<MinSig>::new(
+            polynomial.to_vec(),
+            identity.clone(),
+            share.clone(),
+            threshold as usize,
+        )
+    }
+
+    fn new_verifier(
+        scheme: &BlsThresholdScheme<MinSig>,
+        quorum: Option<u32>,
+    ) -> BatchVerifier<Sha256, BlsThresholdScheme<MinSig>> {
+        BatchVerifier::<Sha256, BlsThresholdScheme<MinSig>>::new(quorum, scheme.clone())
     }
 
     #[test]
@@ -4487,10 +3889,11 @@ mod tests {
     fn test_batch_verifier_add_notarize() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 123);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 123);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
 
         let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+            BatchVerifier::<Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), scheme.clone());
 
         let round = Round::new(0, 1);
         let notarize1_s0 = create_notarize(&shares[0], round, 0, 1); // validator 0
@@ -4528,7 +3931,7 @@ mod tests {
 
         // Test adding when leader is set, but proposal comes from non-leader first
         let mut verifier2 =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+            BatchVerifier::<Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), scheme.clone());
         let round = Round::new(0, 2);
         let notarize_s1_v2 = create_notarize(&shares[1], round, 1, 3); // from validator 1
         let notarize_s0_v2_leader = create_notarize(&shares[0], round, 1, 3); // from validator 0 (leader)
@@ -4551,9 +3954,10 @@ mod tests {
     fn test_batch_verifier_set_leader() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 124);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 124);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
         let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+            BatchVerifier::<Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), scheme.clone());
 
         let round = Round::new(0, 1);
         let notarize_s0 = create_notarize(&shares[0], round, 0, 1);
@@ -4585,10 +3989,10 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_notarizes() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 125);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 125);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
 
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let proposal = Proposal::new(Round::new(0, 1), 0, sample_digest(1));
 
         let notarize_s0 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal.clone());
@@ -4605,7 +4009,7 @@ mod tests {
         assert!(verifier.ready_notarizes()); // notarizes_force is true (Covered by test_ready_notarizes_behavior_with_force_flag)
         assert_eq!(verifier.notarizes.len(), 1);
 
-        let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &polynomial);
+        let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE);
         assert_eq!(verified_n.len(), 1);
         assert!(failed_n.is_empty());
         assert_eq!(verifier.notarizes_verified, 1);
@@ -4621,7 +4025,7 @@ mod tests {
         assert!(verifier.ready_notarizes()); // (Covered by test_ready_notarizes_exact_quorum)
         assert_eq!(verifier.notarizes.len(), 3);
 
-        let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &polynomial);
+        let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE);
         assert_eq!(verified_n.len(), 3);
         assert!(failed_n.is_empty());
         assert_eq!(verifier.notarizes_verified, 1 + 3); // 1 previous + 3 new
@@ -4631,8 +4035,7 @@ mod tests {
         assert!(!verifier.ready_notarizes());
 
         // Scenario: Verification with a faulty signature
-        let mut verifier2 =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let mut verifier2 = new_verifier(&scheme, Some(threshold));
         verifier2.set_leader(shares[0].index); // Set leader
         let round = Round::new(0, 2);
         let leader_notarize = create_notarize(&shares[0], round, 1, 10);
@@ -4651,7 +4054,7 @@ mod tests {
         verifier2.add(Voter::Notarize(faulty_notarize.clone()), false); // Add invalid notarize
         assert!(verifier2.ready_notarizes()); // Force is true
 
-        let (verified_n, failed_n) = verifier2.verify_notarizes(NAMESPACE, &polynomial);
+        let (verified_n, failed_n) = verifier2.verify_notarizes(NAMESPACE);
         assert_eq!(verified_n.len(), 1); // Only leader's should verify
         assert!(verified_n.contains(&Voter::Notarize(leader_notarize)));
         assert_eq!(failed_n.len(), 1);
@@ -4662,9 +4065,9 @@ mod tests {
     fn test_batch_verifier_add_nullify() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 127);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 127);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
 
         let round = Round::new(0, 1);
         let nullify1_s0 = create_nullify(&shares[0], round);
@@ -4684,9 +4087,9 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_nullifies() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 128);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 128);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
 
         let round = Round::new(0, 1);
         let nullify_s0 = create_nullify(&shares[0], round);
@@ -4707,7 +4110,7 @@ mod tests {
         assert!(verifier.ready_nullifies());
         assert_eq!(verifier.nullifies.len(), 3);
 
-        let (verified_null, failed_null) = verifier.verify_nullifies(NAMESPACE, &polynomial);
+        let (verified_null, failed_null) = verifier.verify_nullifies(NAMESPACE);
         assert_eq!(verified_null.len(), 3);
         assert!(failed_null.is_empty());
         assert_eq!(verifier.nullifies_verified, 1 + 3);
@@ -4721,9 +4124,9 @@ mod tests {
     fn test_batch_verifier_add_finalize() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 129);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 129);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
 
         let round = Round::new(0, 1);
         let finalize_s0_prop_a = create_finalize(&shares[0], round, 0, 1); // Proposal A
@@ -4767,9 +4170,9 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_finalizes() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 130);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 130);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));
 
@@ -4804,7 +4207,7 @@ mod tests {
         verifier.add(Voter::Finalize(finalize_s3.clone()), false); // Verified: 1, Pending: 3. Total: 4 == 4
         assert!(verifier.ready_finalizes()); // (Covered by test_ready_finalizes_exact_quorum)
 
-        let (verified_fin, failed_fin) = verifier.verify_finalizes(NAMESPACE, &polynomial);
+        let (verified_fin, failed_fin) = verifier.verify_finalizes(NAMESPACE);
         assert_eq!(verified_fin.len(), 3);
         assert!(failed_fin.is_empty());
         assert_eq!(verifier.finalizes_verified, 1 + 3);
@@ -4818,12 +4221,12 @@ mod tests {
     fn test_batch_verifier_quorum_none() {
         let n_validators = 3;
         let threshold = quorum(n_validators); // Not strictly used by BatchVerifier logic when quorum is None
-        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 200);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 200);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
         let round = Round::new(0, 1);
 
         // Test with Notarizes
-        let mut verifier_n =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(None, None);
+        let mut verifier_n = new_verifier(&scheme, None);
         let prop1 = Proposal::new(round, 0, sample_digest(1));
         let notarize1 = create_notarize(&shares[0], round, 0, 1);
 
@@ -4832,35 +4235,33 @@ mod tests {
         verifier_n.add(Voter::Notarize(notarize1.clone()), false); // Sets leader proposal and notarizes_force
         assert!(verifier_n.ready_notarizes()); // notarizes_force is true, and notarizes is not empty
 
-        let (verified, failed) = verifier_n.verify_notarizes(NAMESPACE, &polynomial);
+        let (verified, failed) = verifier_n.verify_notarizes(NAMESPACE);
         assert_eq!(verified.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(verifier_n.notarizes_verified, 1);
         assert!(!verifier_n.ready_notarizes()); // notarizes_force is false, list is empty
 
         // Test with Nullifies
-        let mut verifier_null =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(None, None);
+        let mut verifier_null = new_verifier(&scheme, None);
         let nullify1 = create_nullify(&shares[0], round);
         assert!(!verifier_null.ready_nullifies()); // List is empty
         verifier_null.add(Voter::Nullify(nullify1.clone()), false);
         assert!(verifier_null.ready_nullifies()); // List is not empty
-        let (verified, failed) = verifier_null.verify_nullifies(NAMESPACE, &polynomial);
+        let (verified, failed) = verifier_null.verify_nullifies(NAMESPACE);
         assert_eq!(verified.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(verifier_null.nullifies_verified, 1);
         assert!(!verifier_null.ready_nullifies()); // List is empty
 
         // Test with Finalizes
-        let mut verifier_f =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(None, None);
+        let mut verifier_f = new_verifier(&scheme, None);
         let finalize1 = create_finalize(&shares[0], round, 0, 1);
         assert!(!verifier_f.ready_finalizes()); // No leader/proposal
         verifier_f.set_leader(shares[0].index);
         verifier_f.set_leader_proposal(prop1.clone()); // Assume prop1 is the leader's proposal
         verifier_f.add(Voter::Finalize(finalize1.clone()), false);
         assert!(verifier_f.ready_finalizes()); // Leader/proposal set, list not empty
-        let (verified, failed) = verifier_f.verify_finalizes(NAMESPACE, &polynomial);
+        let (verified, failed) = verifier_f.verify_finalizes(NAMESPACE);
         assert_eq!(verified.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(verifier_f.finalizes_verified, 1);
@@ -4871,9 +4272,9 @@ mod tests {
     fn test_batch_verifier_leader_proposal_filters_messages() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 201);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 201);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
 
         let round = Round::new(0, 1);
         let proposal_a = Proposal::new(round, 0, sample_digest(10));
@@ -4907,8 +4308,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "self.leader.is_none()")]
     fn test_batch_verifier_set_leader_twice_panics() {
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(3), None);
+        let threshold = quorum(3);
+        let (identity, polynomial, shares) = generate_test_data(3, threshold, 204);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(3));
         verifier.set_leader(0);
         verifier.set_leader(1); // This should panic
     }
@@ -4918,9 +4321,9 @@ mod tests {
     fn test_batch_verifier_add_recovered_message_panics() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 202);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 202);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         let notarization = create_notarization(round, 0, 1, &shares, threshold);
@@ -4931,9 +4334,9 @@ mod tests {
     fn test_ready_notarizes_behavior_with_force_flag() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 203);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 203);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         let leader_notarize = create_notarize(&shares[0], round, 0, 1);
@@ -4953,7 +4356,7 @@ mod tests {
         );
 
         // Assume leader's own notarize is processed. Let's verify it.
-        let (verified, _) = verifier.verify_notarizes(NAMESPACE, &polynomial);
+        let (verified, _) = verifier.verify_notarizes(NAMESPACE);
         assert_eq!(verified.len(), 1);
 
         assert!(
@@ -4970,9 +4373,9 @@ mod tests {
     fn test_ready_notarizes_without_leader_or_proposal() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 204);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 204);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         // Collect sufficient number of unverified notarizes
@@ -4999,9 +4402,9 @@ mod tests {
     fn test_ready_finalizes_without_leader_or_proposal() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 205);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 205);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         for i in 0..threshold {
@@ -5027,8 +4430,9 @@ mod tests {
     fn test_verify_notarizes_empty_pending_when_forced() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 206);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));
@@ -5043,15 +4447,15 @@ mod tests {
     fn test_verify_nullifies_empty_pending() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, polynomial, _) = generate_test_data(n_validators, threshold, 207);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 207);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
 
         assert!(verifier.nullifies.is_empty());
         // ready_nullifies will be false if the list is empty and quorum is Some
         assert!(!verifier.ready_nullifies());
 
-        let (verified, failed) = verifier.verify_nullifies(NAMESPACE, &polynomial);
+        let (verified, failed) = verifier.verify_nullifies(NAMESPACE);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.nullifies_verified, 0);
@@ -5061,16 +4465,16 @@ mod tests {
     fn test_verify_finalizes_empty_pending() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 208);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 208);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
 
         // ready_finalizes will be false if the list is empty and quorum is Some
         verifier.set_leader(shares[0].index);
         assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
 
-        let (verified, failed) = verifier.verify_finalizes(NAMESPACE, &polynomial);
+        let (verified, failed) = verifier.verify_finalizes(NAMESPACE);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.finalizes_verified, 0);
@@ -5080,9 +4484,9 @@ mod tests {
     fn test_ready_notarizes_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 209);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 209);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         let leader_notarize = create_notarize(&shares[0], round, 0, 1);
@@ -5098,7 +4502,7 @@ mod tests {
 
         // Perform forced verification
         assert!(verifier.ready_notarizes());
-        let (verified, failed) = verifier.verify_notarizes(NAMESPACE, &polynomial);
+        let (verified, failed) = verifier.verify_notarizes(NAMESPACE);
         assert_eq!(verified.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(verifier.notarizes_verified, 1 + 1);
@@ -5117,9 +4521,9 @@ mod tests {
     fn test_ready_nullifies_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 210);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 210);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         verifier.add(Voter::Nullify(create_nullify(&shares[0], round)), true); // 1 verified
@@ -5136,9 +4540,9 @@ mod tests {
     fn test_ready_finalizes_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 211);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 211);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));
@@ -5162,9 +4566,9 @@ mod tests {
     fn test_ready_notarizes_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 212);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 212);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         let leader_notarize = create_notarize(&shares[0], round, 0, 1);
@@ -5194,9 +4598,9 @@ mod tests {
     fn test_ready_nullifies_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 213);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 213);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         for share in shares.iter().take(threshold as usize) {
@@ -5216,9 +4620,9 @@ mod tests {
     fn test_ready_finalizes_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, _, shares) = generate_test_data(n_validators, threshold, 214);
-        let mut verifier =
-            BatchVerifier::<MinSig, Sha256, BlsThresholdScheme<MinSig>>::new(Some(threshold), None);
+        let (identity, polynomial, shares) = generate_test_data(n_validators, threshold, 214);
+        let scheme = make_scheme(&identity, &polynomial, &shares[0], threshold);
+        let mut verifier = new_verifier(&scheme, Some(threshold));
         let round = Round::new(0, 1);
 
         let leader_proposal = Proposal::new(round, 0, sample_digest(1));
