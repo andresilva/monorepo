@@ -6,7 +6,7 @@ use crate::{
         metrics::{self, Inbound, Outbound},
         min_active,
         signing::{self, SigningScheme, Vote, VoteContext},
-        types::{Activity, Context, Finalization, Notarization, Nullification, Proposal, Voter},
+        types::{Activity, Context, Proposal, Voter},
     },
     types::{Epoch, Round as Rnd, View},
     Automaton, Epochable, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
@@ -1376,29 +1376,32 @@ where
         }
 
         // Verify notarization
-        let identity = self.supervisor.identity();
-        let certificate = signing_notarization.certificate.clone();
-        let legacy = Notarization::<V, D>::from_signing::<G>(signing_notarization.clone());
-        let scheme_valid = self
+        if self
             .signing
             .verify_certificate::<D>(
                 VoteContext::Notarize {
                     namespace: &self.namespace,
                     proposal: &signing_notarization.proposal,
                 },
-                &certificate,
+                &signing_notarization.certificate,
             )
-            .is_ok();
-        if !scheme_valid && !legacy.verify(&self.namespace, identity) {
+            .is_err()
+        {
             return Action::Block;
         }
 
         // Handle notarization
-        self.handle_notarization(signing_notarization).await;
+        let seed_signature = signing_notarization.certificate.1.clone();
+        self.handle_notarization(signing_notarization, seed_signature)
+            .await;
         Action::Process
     }
 
-    async fn handle_notarization(&mut self, signing_notarization: signing::Notarization<G, D>) {
+    async fn handle_notarization(
+        &mut self,
+        signing_notarization: signing::Notarization<G, D>,
+        seed: V::Signature,
+    ) {
         // Create round (if it doesn't exist)
         let view = signing_notarization.proposal.view();
         let round = self.views.entry(view).or_insert(Round::new(
@@ -1410,8 +1413,6 @@ where
         ));
 
         // Store notarization
-        let legacy = Notarization::<V, D>::from_signing::<G>(signing_notarization.clone());
-        let seed = legacy.seed_signature.clone();
         let added = round.add_verified_notarization(signing_notarization.clone());
         if added {
             if let Some(journal) = self.journal.as_mut() {
@@ -1448,29 +1449,32 @@ where
         }
 
         // Verify nullification
-        let identity = self.supervisor.identity();
-        let certificate = signing_nullification.certificate.clone();
-        let legacy = Nullification::<V>::from_signing::<G>(signing_nullification.clone());
-        let scheme_valid = self
+        if self
             .signing
             .verify_certificate::<D>(
                 VoteContext::Nullify {
                     namespace: &self.namespace,
                     round: signing_nullification.round,
                 },
-                &certificate,
+                &signing_nullification.certificate,
             )
-            .is_ok();
-        if !scheme_valid && !legacy.verify(&self.namespace, identity) {
+            .is_err()
+        {
             return Action::Block;
         }
 
         // Handle notarization
-        self.handle_nullification(signing_nullification).await;
+        let seed_signature = signing_nullification.certificate.1.clone();
+        self.handle_nullification(signing_nullification, seed_signature)
+            .await;
         Action::Process
     }
 
-    async fn handle_nullification(&mut self, signing_nullification: signing::Nullification<G>) {
+    async fn handle_nullification(
+        &mut self,
+        signing_nullification: signing::Nullification<G>,
+        seed: V::Signature,
+    ) {
         // Create round (if it doesn't exist)
         let view = signing_nullification.round.view();
         let round = self.views.entry(view).or_insert(Round::new(
@@ -1482,8 +1486,6 @@ where
         ));
 
         // Store nullification
-        let legacy = Nullification::<V>::from_signing::<G>(signing_nullification.clone());
-        let seed = legacy.seed_signature.clone();
         let added = round.add_verified_nullification(signing_nullification.clone());
         if added {
             if let Some(journal) = self.journal.as_mut() {
@@ -1543,29 +1545,32 @@ where
         }
 
         // Verify finalization
-        let identity = self.supervisor.identity();
-        let certificate = signing_finalization.certificate.clone();
-        let legacy = Finalization::<V, D>::from_signing::<G>(signing_finalization.clone());
-        let scheme_valid = self
+        if self
             .signing
             .verify_certificate::<D>(
                 VoteContext::Finalize {
                     namespace: &self.namespace,
                     proposal: &signing_finalization.proposal,
                 },
-                &certificate,
+                &signing_finalization.certificate,
             )
-            .is_ok();
-        if !scheme_valid && !legacy.verify(&self.namespace, identity) {
+            .is_err()
+        {
             return Action::Block;
         }
 
         // Process finalization
-        self.handle_finalization(signing_finalization).await;
+        let seed_signature = signing_finalization.certificate.1.clone();
+        self.handle_finalization(signing_finalization, seed_signature)
+            .await;
         Action::Process
     }
 
-    async fn handle_finalization(&mut self, signing_finalization: signing::Finalization<G, D>) {
+    async fn handle_finalization(
+        &mut self,
+        signing_finalization: signing::Finalization<G, D>,
+        seed: V::Signature,
+    ) {
         // Create round (if it doesn't exist)
         let view = signing_finalization.proposal.view();
         let round = self.views.entry(view).or_insert(Round::new(
@@ -1577,8 +1582,6 @@ where
         ));
 
         // Store finalization
-        let legacy = Finalization::<V, D>::from_signing::<G>(signing_finalization.clone());
-        let seed = legacy.seed_signature.clone();
         let added = round.add_verified_finalization(signing_finalization.clone());
         if added {
             if let Some(journal) = self.journal.as_mut() {
@@ -1738,7 +1741,9 @@ where
             resolver
                 .notarized_signing(signing_notarization.clone())
                 .await;
-            self.handle_notarization(signing_notarization.clone()).await;
+            let seed_signature = signing_notarization.certificate.1.clone();
+            self.handle_notarization(signing_notarization.clone(), seed_signature)
+                .await;
 
             // Sync the journal
             self.journal
@@ -1775,7 +1780,8 @@ where
             resolver
                 .nullified_signing(signing_nullification.clone())
                 .await;
-            self.handle_nullification(signing_nullification.clone())
+            let seed_signature = signing_nullification.certificate.1.clone();
+            self.handle_nullification(signing_nullification.clone(), seed_signature)
                 .await;
 
             // Sync the journal
@@ -1896,7 +1902,9 @@ where
             self.outbound_messages
                 .get_or_create(&metrics::FINALIZATION)
                 .inc();
-            self.handle_finalization(signing_finalization.clone()).await;
+            let seed_signature = signing_finalization.certificate.1.clone();
+            self.handle_finalization(signing_finalization.clone(), seed_signature)
+                .await;
 
             // Sync the journal
             self.journal
@@ -2008,7 +2016,9 @@ where
                         }
                     }
                     Voter::Notarization(signing_notarization) => {
-                        self.handle_notarization(signing_notarization.clone()).await;
+                        let seed_signature = signing_notarization.certificate.1.clone();
+                        self.handle_notarization(signing_notarization.clone(), seed_signature)
+                            .await;
                         let activity = Activity::Notarization(signing_notarization.clone());
                         self.reporter.report(activity).await;
 
@@ -2030,7 +2040,8 @@ where
                         }
                     }
                     Voter::Nullification(signing_nullification) => {
-                        self.handle_nullification(signing_nullification.clone())
+                        let seed_signature = signing_nullification.certificate.1.clone();
+                        self.handle_nullification(signing_nullification.clone(), seed_signature)
                             .await;
                         let activity = Activity::Nullification(signing_nullification.clone());
                         self.reporter.report(activity).await;
@@ -2053,7 +2064,9 @@ where
                         }
                     }
                     Voter::Finalization(signing_finalization) => {
-                        self.handle_finalization(signing_finalization.clone()).await;
+                        let seed_signature = signing_finalization.certificate.1.clone();
+                        self.handle_finalization(signing_finalization.clone(), seed_signature)
+                            .await;
                         let activity = Activity::Finalization(signing_finalization.clone());
                         self.reporter.report(activity).await;
 
@@ -2254,15 +2267,21 @@ where
                         }
                         Voter::Notarization(signing_notarization) => {
                             trace!(view, "received notarization from resolver");
-                            self.handle_notarization(signing_notarization).await;
+                            let seed_signature = signing_notarization.certificate.1.clone();
+                            self.handle_notarization(signing_notarization, seed_signature)
+                                .await;
                         }
                         Voter::Nullification(signing_nullification) => {
                             trace!(view, "received nullification from resolver");
-                            self.handle_nullification(signing_nullification).await;
+                            let seed_signature = signing_nullification.certificate.1.clone();
+                            self.handle_nullification(signing_nullification, seed_signature)
+                                .await;
                         }
                         Voter::Finalization(signing_finalization) => {
                             trace!(view, "received finalization from resolver");
-                            self.handle_finalization(signing_finalization).await;
+                            let seed_signature = signing_finalization.certificate.1.clone();
+                            self.handle_finalization(signing_finalization, seed_signature)
+                                .await;
                         }
                     }
                 },

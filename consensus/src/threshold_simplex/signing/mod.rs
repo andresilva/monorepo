@@ -1365,7 +1365,6 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threshold_simplex::types;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
@@ -1435,9 +1434,24 @@ mod tests {
             )
             .expect("sign vote");
 
-        let legacy = types::Notarize::<MinSig, _>::sign(namespace, &share, proposal.clone());
-        assert!(vote.signature.0 == legacy.proposal_signature.value);
-        assert!(vote.signature.1 == legacy.seed_signature.value);
+        let notarize_ns = notarize_namespace(namespace);
+        let proposal_sig = partial_sign_message::<MinSig>(
+            &share,
+            Some(notarize_ns.as_ref()),
+            proposal.encode().as_ref(),
+        )
+        .value;
+
+        let seed_ns = seed_namespace(namespace);
+        let seed_sig = partial_sign_message::<MinSig>(
+            &share,
+            Some(seed_ns.as_ref()),
+            proposal.round.encode().as_ref(),
+        )
+        .value;
+
+        assert_eq!(vote.signature.0, proposal_sig);
+        assert_eq!(vote.signature.1, seed_sig);
     }
 
     #[test]
@@ -1459,9 +1473,24 @@ mod tests {
             .sign_vote::<Sha256Digest>(VoteContext::Nullify { namespace, round }, share.index)
             .expect("sign vote");
 
-        let legacy = types::Nullify::<MinSig>::sign(namespace, &share, round);
-        assert!(vote.signature.0 == legacy.view_signature.value);
-        assert!(vote.signature.1 == legacy.seed_signature.value);
+        let nullify_ns = nullify_namespace(namespace);
+        let view_sig = partial_sign_message::<MinSig>(
+            &share,
+            Some(nullify_ns.as_ref()),
+            round.encode().as_ref(),
+        )
+        .value;
+
+        let seed_ns = seed_namespace(namespace);
+        let seed_sig = partial_sign_message::<MinSig>(
+            &share,
+            Some(seed_ns.as_ref()),
+            round.encode().as_ref(),
+        )
+        .value;
+
+        assert_eq!(vote.signature.0, view_sig);
+        assert_eq!(vote.signature.1, seed_sig);
     }
 
     #[test]
@@ -1491,13 +1520,24 @@ mod tests {
             )
             .expect("sign vote");
 
-        let legacy = types::Finalize::<MinSig, _>::sign(namespace, &share, proposal.clone());
-        assert!(vote.signature.0 == legacy.proposal_signature.value);
+        let finalize_ns = finalize_namespace(namespace);
+        let proposal_sig = partial_sign_message::<MinSig>(
+            &share,
+            Some(finalize_ns.as_ref()),
+            proposal.encode().as_ref(),
+        )
+        .value;
+
         let seed_ns = seed_namespace(namespace);
-        let seed_bytes = proposal.round.encode();
-        let expected_seed =
-            partial_sign_message::<MinSig>(&share, Some(seed_ns.as_ref()), seed_bytes.as_ref());
-        assert!(vote.signature.1 == expected_seed.value);
+        let seed_sig = partial_sign_message::<MinSig>(
+            &share,
+            Some(seed_ns.as_ref()),
+            proposal.round.encode().as_ref(),
+        )
+        .value;
+
+        assert_eq!(vote.signature.0, proposal_sig);
+        assert_eq!(vote.signature.1, seed_sig);
     }
 
     #[test]
