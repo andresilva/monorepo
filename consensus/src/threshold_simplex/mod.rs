@@ -374,16 +374,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -393,10 +385,6 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
-
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -408,18 +396,10 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -438,11 +418,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -632,16 +613,8 @@ mod tests {
             network.start();
 
             // Register participants (active)
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n_active {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            schemes.sort_by_key(|s| s.public_key());
-            validators.sort();
+            let (mut schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n_active);
 
             // Add observer (no share)
             let scheme_observer = PrivateKey::from_seed(n_active as u64);
@@ -662,10 +635,6 @@ mod tests {
             };
             link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n_active, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -678,16 +647,16 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
+                // FIXME
                 let share = if is_observer {
                     None
                 } else {
-                    Some(shares[idx].clone())
+                    Some(signing_schemes[idx].clone())
                 };
-                participants.insert(0, (polynomial.clone(), validators.clone(), share));
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -707,10 +676,11 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     blocker,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -813,16 +783,8 @@ mod tests {
                 network.start();
 
                 // Register participants
-                let mut schemes = Vec::new();
-                let mut validators = Vec::new();
-                for i in 0..n {
-                    let scheme = PrivateKey::from_seed(i as u64);
-                    let pk = scheme.public_key();
-                    schemes.push(scheme);
-                    validators.push(pk);
-                }
-                validators.sort();
-                schemes.sort_by_key(|s| s.public_key());
+                let (schemes, validators, signing_schemes) =
+                    mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
                 let mut registrations = register_validators(&mut oracle, &validators).await;
 
                 // Link all validators
@@ -854,9 +816,10 @@ mod tests {
                             Some(shares[idx].clone()),
                         ),
                     );
-                    let supervisor_config = mocks::supervisor::Config::<_, V> {
+                    let supervisor_config = mocks::supervisor::Config {
                         namespace: namespace.clone(),
-                        participants,
+                        participants: validators.clone(),
+                        signing: signing_schemes[idx].clone(),
                     };
                     let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
@@ -875,11 +838,12 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        participants: validators.clone(),
+                        signing: signing_schemes[idx].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
-                        supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -996,16 +960,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -1022,10 +978,6 @@ mod tests {
             )
             .await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -1041,18 +993,10 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
                 let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -1071,11 +1015,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1169,18 +1114,10 @@ mod tests {
             .await;
 
             // Configure engine
-            let mut participants = BTreeMap::new();
-            participants.insert(
-                0,
-                (
-                    polynomial.clone(),
-                    validators.clone(),
-                    Some(shares[0].clone()),
-                ),
-            );
-            let supervisor_config = mocks::supervisor::Config::<_, V> {
+            let supervisor_config = mocks::supervisor::Config {
                 namespace: namespace.clone(),
-                participants,
+                participants: validators.clone(),
+                signing: signing_schemes[0].clone(),
             };
             let mut supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
             supervisors.push(supervisor.clone());
@@ -1199,11 +1136,12 @@ mod tests {
             let blocker = oracle.control(scheme.public_key());
             let cfg = config::Config {
                 crypto: scheme,
+                participants: validators.clone(),
+                signing: signing_schemes[0].clone(),
                 blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
-                supervisor: supervisor.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: 333,
@@ -1271,16 +1209,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -1297,10 +1227,6 @@ mod tests {
             )
             .await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -1316,18 +1242,10 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -1346,11 +1264,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1539,16 +1458,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1573,18 +1484,10 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -1613,11 +1516,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1729,16 +1633,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1748,10 +1644,6 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
-
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1763,18 +1655,10 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -1793,11 +1677,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1945,16 +1830,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1964,10 +1841,6 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
-
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1979,18 +1852,10 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -2009,11 +1874,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -2157,16 +2023,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2176,10 +2034,6 @@ mod tests {
                 success_rate: 0.5,
             };
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
-
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2191,18 +2045,10 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -2221,11 +2067,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -2338,16 +2185,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2358,10 +2197,6 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -2371,18 +2206,10 @@ mod tests {
 
                 // Start engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (pending, recovered, resolver) = registrations
@@ -2390,11 +2217,11 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
-                        supervisor,
                         namespace: namespace.clone(),
+                        signing: signing_schemes[idx_scheme].clone(),
                     };
 
-                    let engine: mocks::conflicter::Conflicter<_, V, Sha256, _> =
+                    let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
                         mocks::conflicter::Conflicter::new(
                             context.with_label("byzantine_engine"),
                             cfg,
@@ -2418,10 +2245,11 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         blocker,
+                        participants: validators.clone(),
+                        signing: signing_schemes[idx_scheme].clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
-                        supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2533,16 +2361,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2553,10 +2373,6 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -2566,18 +2382,10 @@ mod tests {
 
                 // Start engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (pending, recovered, resolver) = registrations
@@ -2585,11 +2393,11 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::invalid::Config {
-                        supervisor,
+                        signing: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                     };
 
-                    let engine: mocks::invalid::Invalid<_, V, Sha256, _> =
+                    let engine: mocks::invalid::Invalid<_, _, Sha256> =
                         mocks::invalid::Invalid::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
@@ -2609,11 +2417,12 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        participants: validators.clone(),
+                        signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
-                        supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2713,16 +2522,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2733,10 +2534,6 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -2746,18 +2543,10 @@ mod tests {
 
                 // Start engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (pending, recovered, resolver) = registrations
@@ -2765,11 +2554,11 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::impersonator::Config {
-                        supervisor,
+                        signing: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                     };
 
-                    let engine: mocks::impersonator::Impersonator<_, V, Sha256, _> =
+                    let engine: mocks::impersonator::Impersonator<_, _, Sha256> =
                         mocks::impersonator::Impersonator::new(
                             context.with_label("byzantine_engine"),
                             cfg,
@@ -2792,11 +2581,12 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        participants: validators.clone(),
+                        signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
-                        supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2892,16 +2682,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2912,10 +2694,6 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -2925,18 +2703,10 @@ mod tests {
 
                 // Start engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (pending, recovered, resolver) = registrations
@@ -2944,10 +2714,10 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::reconfigurer::Config {
-                        supervisor,
+                        signing: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::reconfigurer::Reconfigurer<_, V, Sha256, _> =
+                    let engine: mocks::reconfigurer::Reconfigurer<_, _, Sha256> =
                         mocks::reconfigurer::Reconfigurer::new(
                             context.with_label("byzantine_engine"),
                             cfg,
@@ -2970,11 +2740,12 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        participants: validators.clone(),
+                        signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
-                        supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -3070,16 +2841,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3090,10 +2853,6 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -3103,18 +2862,10 @@ mod tests {
 
                 // Start engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (pending, recovered, resolver) = registrations
@@ -3122,10 +2873,10 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
-                        supervisor,
                         namespace: namespace.clone(),
+                        signing: signing_schemes[idx_scheme].clone(),
                     };
-                    let engine: mocks::nuller::Nuller<_, V, Sha256, _> =
+                    let engine: mocks::nuller::Nuller<_, _, Sha256> =
                         mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
@@ -3145,11 +2896,12 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        participants: validators.clone(),
+                        signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
-                        supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -3258,16 +3010,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3278,10 +3022,6 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
@@ -3291,18 +3031,10 @@ mod tests {
 
                 // Start engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx_scheme].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx_scheme].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (pending, recovered, resolver) = registrations
@@ -3310,11 +3042,11 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
-                        supervisor,
+                        signing: signing_schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
                         view_delta: activity_timeout * 4,
                     };
-                    let engine: mocks::outdated::Outdated<_, V, Sha256, _> =
+                    let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
@@ -3334,11 +3066,12 @@ mod tests {
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        participants: validators.clone(),
+                        signing: signing_schemes[idx_scheme].clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
-                        supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -3427,16 +3160,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3446,10 +3171,6 @@ mod tests {
                 success_rate: 0.98,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
-
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -3461,18 +3182,10 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx].clone()),
-                    ),
-                );
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -3491,11 +3204,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -3584,16 +3298,8 @@ mod tests {
             network.start();
 
             // Register participants
-            let mut schemes = Vec::new();
-            let mut validators = Vec::new();
-            for i in 0..n {
-                let scheme = PrivateKey::from_seed(i as u64);
-                let pk = scheme.public_key();
-                schemes.push(scheme);
-                validators.push(pk);
-            }
-            validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            let (schemes, validators, signing_schemes) =
+                mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -3603,11 +3309,6 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
-
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
-            let public_key = *public::<V>(&polynomial);
 
             // Create engines and supervisors
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -3620,20 +3321,12 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators.clone(),
-                        Some(shares[idx].clone()),
-                    ),
-                );
 
                 // Store first supervisor for monitoring
-                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                let supervisor_config = mocks::supervisor::Config {
                     namespace: namespace.clone(),
-                    participants,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
@@ -3657,11 +3350,12 @@ mod tests {
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    participants: validators.clone(),
+                    signing: signing_schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
-                    supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -3697,7 +3391,7 @@ mod tests {
             let seed_namespace = seed_namespace(&namespace);
             let ciphertext = encrypt::<_, V>(
                 &mut context,
-                public_key,
+                signing_schemes[0].identity(),
                 (Some(&seed_namespace), &target.encode()),
                 &message,
             );
@@ -3713,7 +3407,7 @@ mod tests {
                 };
 
                 // Decrypt the message using the seed signature
-                let seed_signature = notarization.seed_signature;
+                let seed_signature = notarization.certificate.1;
                 let decrypted = decrypt::<V>(&seed_signature, &ciphertext)
                     .expect("Decryption should succeed with valid seed signature");
                 assert_eq!(
